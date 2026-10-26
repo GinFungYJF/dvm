@@ -845,10 +845,12 @@ struct vReduceJoin {
   uint64_t xs;
   uint64_t ws;
   uint64_t seg_tile_rel;
+  uint64_t capacity;
   // pc[0]: c_xd(13) << 13 | seg_tile_rel(12)
   // pc[1]: iter_num(16) << 48 | iter_stride(17) << 31 | c_xs(13) << 18 | xn(18)
   // pc[2]: ws
   // pc[3]: store_cond
+  // pc[4]: capacity
   __aicore_inline__ void Decode(bcodeptr_t pc, uint64_t head, vReduceJoin &op) {
     op.seg_tile_rel = vGetBitRange(head, V_HEAD_EXT_OFFSET, 12);
     op.xd = vDeCompactX(vGetBitRange(head, V_HEAD_EXT_OFFSET + V_C_X_BITS, V_C_X_BITS));
@@ -858,13 +860,15 @@ struct vReduceJoin {
     op.xs = vDeCompactX(vGetBitRange(data, 18, 13));
     op.xn = vGetBitRange(data, 0, 18);
     op.ws = pc[2];
+    op.capacity = pc[4];
   }
   __aicore_inline__ uint64_t Encode(bcodeptr_t pc, const vReduceJoin &op) {
-    uint64_t size = 4;
+    constexpr uint64_t size = 5;
     pc[0] = vMakeSimdHead(V_RSUM_JOIN, vCompactX(op.xd) << V_C_X_BITS, size);
     pc[1] = op.iter_num << 48 | op.iter_stride << 31 | vCompactX(op.xs) << 18 | op.xn;
     pc[2] = op.ws;
     pc[3] = 0;
+    pc[4] = op.capacity;
     return size;
   }
 };

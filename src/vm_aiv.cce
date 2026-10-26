@@ -724,7 +724,7 @@ __aicore_inline__ void ReduceY(bcodeptr_t pc, uint64_t head, uint64_t tile) {
 
 __aicore_inline__ void ReduceJoin(bcodeptr_t pc, uint64_t head, uint64_t tile) {
   vReduceJoin op;
-  vReduceJoin ::Decode(pc, head, op);
+  vReduceJoin::Decode(pc, head, op);
   uint32_t red_head = *reinterpret_cast<__bcode__ uint32_t *>(pc + op.seg_tile_rel);
   uint64_t iter_total = op.iter_num * op.iter_stride;
   uint64_t lenburst = (iter_total + 7) >> BlockDataShift(float);

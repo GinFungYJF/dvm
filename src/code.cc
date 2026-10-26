@@ -729,6 +729,8 @@ void DumpReduceJoin(const DumpInfo &dump_info, std::ostringstream &oss) {
   DumpVal("ws", reinterpret_cast<void *>(op.ws), oss);
   oss << ", ";
   DumpVal("seg_tile_rel", op.seg_tile_rel, oss);
+  oss << ", ";
+  DumpVal("capacity", op.capacity, oss);
 }
 
 void DumpCopy(const DumpInfo &dump_info, std::ostringstream &oss) {

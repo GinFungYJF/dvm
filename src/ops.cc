@@ -3218,6 +3218,7 @@ uint64_t ReduceOp::EmitDeterm(VectorKernel &k) {
   op.xd = xbuf_;
   op.xn = wss_[0];
   op.xs = wss_[1];
+  op.capacity = k.tile_size_ * ITEM_SIZE[k.MaxType()];
   if (ndd_.lead_stride() == ndd_.lead_dim()) {
     op.iter_num = 1;
     op.iter_stride = ndd_.stride_back();
