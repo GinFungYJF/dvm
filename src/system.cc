@@ -556,7 +556,7 @@ void System::DoInit() {
   } else if (arch_ == kAiCore_C310) {
     cube_store_type_ = kCubeStoreUB;
     bt_size_ = 4096;
-    ub_workspace_size_ = 256; // avoid access overflow: vlds etc.
+    ub_workspace_size_ = 512; // avoid access overflow: vlds etc.
     g_access_func_offset_ = g_access_func_offset_c310;
     g_simd_func_offset_ = g_simd_func_offset_c310;
     g_visit_func_offset_ = g_visit_func_offset_c310;

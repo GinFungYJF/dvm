@@ -154,9 +154,9 @@ def test_broadcast_s_bool(scalar):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
-def test_broadcast_s_int64_scalar_ref():
+@pytest.mark.parametrize('shape', [(1024, 1025), (56, 10888)])
+def test_broadcast_s_int64_scalar_ref(shape):
     t = Tester('vector:dyn')
-    shape = (1024, 1025)
     x = t.load([-1], "int64")
     s = t.scalar(dvm.int64)
     y = t.full(s, shape, "int64")
