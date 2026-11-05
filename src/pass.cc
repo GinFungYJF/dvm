@@ -901,6 +901,26 @@ void EliminateDiamondView(BasicBlock &bb) {
   }
 }
 
+#ifdef DVM_ARCH_GPU
+class PassOptimizerGpu : public PassOptimizer {
+ public:
+  void RunPass(BasicBlock &bb, bool dyn_shape) override {
+    DeadCodeEliminate(bb);
+    if (!dyn_shape) {
+      EliminateReshape(bb);
+    }
+    EliminateDiamondView(bb);
+    CompactPeakLiveness(bb);
+    ReorderLoad(bb);
+    ReorderStore(bb);
+    VectorDoubleBuffer(bb);
+  }
+};
+PassOptimizer *CreateOptimizer(AiCoreArch arch) {
+  (void)arch;
+  return new PassOptimizerGpu();
+}
+#else
 class PassOptimizerC220 : public PassOptimizer {
  public:
   void RunPass(BasicBlock &bb, bool dyn_shape) override {
@@ -939,4 +959,5 @@ PassOptimizer *CreateOptimizer(AiCoreArch arch) {
   }
   return new PassOptimizerC310();
 }
+#endif // DVM_ARCH_GPU
 }  // namespace dvm::pass

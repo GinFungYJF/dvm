@@ -21,6 +21,7 @@ from tests.mark_utils import arg_mark
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
+@pytest.mark.gpu
 def test_simd_unalign(type):
     t = Tester()
     a = np.full([16, 1], 0.5, type)
@@ -60,6 +61,7 @@ def test_tile_unalign_loadstore2():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_tile_unalign_leaddim():
     t = Tester()
     a = np.full([4080], 0.2, np.float32)

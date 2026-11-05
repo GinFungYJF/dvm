@@ -20,8 +20,34 @@
 #include <vector>
 #include "dvm.h"
 #include "system.h"
-#include "acl/acl_rt.h"
+#include "runtime.h"
+
+#ifdef DVM_ARCH_GPU
+// Minimal profiling record placeholders for the GPU backend. The profiling
+// implementation is a no-op in phase 1; the fields exist so the shared tuning
+// and kernel code can keep compiling against the same interfaces.
+struct MsprofAdditionalInfo {
+  uint8_t data[256];
+};
+struct MsprofCompactInfo {
+  uint8_t data[256];
+};
+struct MsprofApi {
+  uint64_t beginTime;
+  uint64_t endTime;
+  uint32_t type;
+  uint32_t level;
+  uint32_t itemId;
+};
+struct MsprofTensorInfo {
+  uint8_t data[256];
+};
+struct MsprofContextIdInfo {
+  uint8_t data[256];
+};
+#else
 #include "profiling/prof_api.h"
+#endif
 
 namespace dvm {
 struct TensorInfoWrapper {
@@ -127,6 +153,10 @@ struct NodeInfo {
   std::vector<IntArrayRef *> shapes;
   std::vector<TensorDtypeMs> data_types;
 
+#ifdef DVM_ARCH_GPU
+  void AppendInput(NDObject *) {}
+  void AppendOutput(NDObject *) {}
+#else
   void AppendInput(NDObject *op) {
     shapes.emplace_back(op->shape_ref_);
     data_types.emplace_back(MAP_DTYPE_TO_MSDTYPE[op->type_id_]);
@@ -138,6 +168,7 @@ struct NodeInfo {
     data_types.emplace_back(MAP_DTYPE_TO_MSDTYPE[op->type_id_]);
     output_size++;
   }
+#endif
 };
 
 class MsprofHelper {
@@ -145,10 +176,17 @@ class MsprofHelper {
   MsprofHelper() = default;
   ~MsprofHelper() = default;
 
+#ifdef DVM_ARCH_GPU
+  void InitReportNode() {}
+  void UpdateReportNode(uint32_t block_dim) {}
+  void Update(uint32_t kernel_target) {}
+  void ReportTask() {}
+#else
   void InitReportNode();
   void UpdateReportNode(uint32_t block_dim);
   void Update(uint32_t kernel_target);
   void ReportTask();
+#endif
 
   NodeInfo info_;
 
@@ -163,18 +201,26 @@ class MsprofHelper {
 
 class TimeProfiler {
  public:
-  TimeProfiler();
-  ~TimeProfiler();
-  void RecordStart(void *stream) { ERROR_CHECK(aclrtRecordEvent(start_, stream)); }
+  TimeProfiler() {
+    ERROR_CHECK(rt::CreateEvent(&start_));
+    ERROR_CHECK(rt::CreateEvent(&end_));
+  }
+  ~TimeProfiler() {
+    (void)rt::DestroyEvent(start_);
+    (void)rt::DestroyEvent(end_);
+  }
+  void RecordStart(void *stream) {
+    ERROR_CHECK(rt::RecordEvent(start_, static_cast<rt::Stream>(stream)));
+  }
   float RecordEnd(void *stream) {
-    ERROR_CHECK(aclrtRecordEvent(end_, stream));
-    ERROR_CHECK(aclrtSynchronizeStream(stream));
+    ERROR_CHECK(rt::RecordEvent(end_, static_cast<rt::Stream>(stream)));
+    ERROR_CHECK(rt::SynchronizeStream(static_cast<rt::Stream>(stream)));
     float time_us = 0.0f;
-    ERROR_CHECK(aclrtEventElapsedTime(&time_us, start_, end_));
+    ERROR_CHECK(rt::EventElapsedTime(&time_us, start_, end_));
     return time_us;
   }
  protected:
-  aclrtEvent start_, end_;
+  rt::Event start_, end_;
 };
 
 class RepeatProfiler : public TimeProfiler {

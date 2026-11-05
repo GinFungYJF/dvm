@@ -13,7 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#define _CCE_KERNEL_
+#ifndef _VM_KERNEL_
+#error "vm_aic.h must be included from a VM kernel translation unit"
+#endif
+#ifndef __VM_ARCH__
+#error "vm_aic.h requires __VM_ARCH__"
+#endif
 #include "isa.h"
 
 inline constexpr uint64_t L0_PINGPONG_BUFFER_LEN = 16384;

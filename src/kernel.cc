@@ -192,6 +192,80 @@ struct XbufPool {
   Node builtin_pool_[BUILTIN_POOL_SIZE];
 };
 
+#ifdef DVM_ARCH_GPU
+constexpr uint64_t kGpuXbufReserved = 32;
+class CodeGenHelper {
+ public:
+  CodeGenHelper(VectorKernel &kernel, uint32_t xbuf_size, uint32_t pool_size)
+      : xbuf_size_(xbuf_size), free_xbuf_(pool_size), kernel_(kernel) {}
+
+  uint8_t *Generate(uint8_t *code_begin, uint64_t code_reserve) {
+    uint64_t *code_ptr = reinterpret_cast<uint64_t *>(code_begin);
+    static_xbuf_ = kGpuXbufReserved;
+    uint64_t lead_align = kernel_.LeadAlign();
+    ASSERT(kernel_.comm_op_ == nullptr);
+    for (auto op : kernel_.objects_) {
+      auto flags = op->flags_;
+      if (flags & OBJ_FLAG_DEAD) {
+        continue;
+      }
+      if (!op->IsStore()) {
+        op->xbuf_ = AllocXBuf();
+        if (flags & (OBJ_FLAG_WORKSPACE | OBJ_FLAG_XHS)) {
+          auto flex = static_cast<FlexOp *>(op);
+          if (flex->ws_num_ > 0) {
+            ASSERT(flex->ws_num_ <= 2);
+            flex->wss_[0] = AllocXBuf();
+            if (flex->ws_num_ > 1) {
+              flex->wss_[1] = AllocXBuf();
+              FreeXBuf(flex->wss_[1]);
+            }
+            FreeXBuf(flex->wss_[0]);
+          }
+          if (auto xhs = flex->xhs_; xhs && xhs->free_mask) {
+            for (int i = 0; i < xhs->in_num; ++i) {
+              if (xhs->free_mask & (1u << i)) {
+                FreeXBuf(xhs->data[i]->xbuf_);
+              }
+            }
+          }
+        }
+      }
+      if (flags & OBJ_FLAG_FREE_LHS) {
+        FreeXBuf(op->lhs_->xbuf_);
+      }
+      if (flags & OBJ_FLAG_FREE_RHS) {
+        FreeXBuf(op->rhs_->xbuf_);
+      }
+      op->tail_insn_ = op->insn_ = code_ptr;
+      if (auto ndd = op->Ndd()) {
+        ndd->UpdateStride(lead_align);
+      }
+      code_ptr += op->Emit(kernel_);
+    }
+    *code_ptr++ = 0;
+    return reinterpret_cast<uint8_t *>(code_ptr);
+  }
+
+ private:
+  uint64_t AllocXBuf() {
+    if (!free_xbuf_.Empty()) {
+      auto &node = free_xbuf_.Pop();
+      return node.first;
+    }
+    ASSERT(static_xbuf_ + xbuf_size_ <= kernel_.local_mem_size_);
+    uint64_t xbuf = static_xbuf_;
+    static_xbuf_ += xbuf_size_;
+    return xbuf;
+  }
+  void FreeXBuf(uint64_t xbuf) { free_xbuf_.Push(xbuf, nullptr); }
+
+  uint64_t static_xbuf_;
+  uint32_t xbuf_size_;
+  XbufPool free_xbuf_;
+  VectorKernel &kernel_;
+};
+#else
 class CodeGenHelper {
  public:
   struct EventManager {
@@ -636,6 +710,7 @@ class CodeGenHelper {
 
   VectorKernel &kernel_;
 };
+#endif // DVM_ARCH_GPU
 
 void VectorKernel::BuildDomain() {
   uint32_t one_bits = 0;
@@ -1158,6 +1233,54 @@ static inline bool LhsInplaceCheck(NDObject *obj) {
 }
 
 int64_t VectorKernel::Analyze() {
+#ifdef DVM_ARCH_GPU
+  int cur_live = 0;
+  int peak_live = 0;
+  for (auto it = objects_.rbegin(); it != objects_.rend(); ++it) {
+    auto op = *it;
+    if (!op->xbuf_ && !op->IsStore()) {
+      op->flags_ |= OBJ_FLAG_DEAD;
+      continue;
+    }
+    if (auto lhs = op->lhs_) {
+      if (!OP_LIVE(lhs)) {
+        OP_GEN_D(lhs);
+        op->flags_ |= OBJ_FLAG_FREE_LHS;
+        cur_live++;
+      }
+      if (auto rhs = op->rhs_) {
+        if (!OP_LIVE(rhs)) {
+          OP_GEN_D(rhs);
+          op->flags_ |= OBJ_FLAG_FREE_RHS;
+          cur_live++;
+        }
+        if (op->flags_ & OBJ_FLAG_XHS) {
+          auto xhs = static_cast<FlexOp *>(op)->xhs_;
+          xhs->free_mask = 0;
+          for (int i = 0; i < xhs->in_num; ++i) {
+            if (auto in = xhs->data[i]; !OP_LIVE(in)) {
+              OP_GEN_D(in);
+              xhs->free_mask |= (1u << i);
+              cur_live++;
+            }
+          }
+        }
+      }
+    }
+    int peak = cur_live;
+    if (op->flags_ & OBJ_FLAG_WORKSPACE) {
+      peak += static_cast<FlexOp *>(op)->ws_num_;
+    }
+    if (peak > peak_live) {
+      peak_live = peak;
+    }
+    op->xbuf_ = 0;
+    if (!op->IsStore()) {
+      cur_live--;
+    }
+  }
+  return peak_live;
+#else
   constexpr int REUSE_REJECT = -1;
   constexpr int REUSE_READY = 0;
   constexpr int REUSE_SUCC = 1;
@@ -1303,9 +1426,15 @@ int64_t VectorKernel::Analyze() {
     }
   }
   return live_peak;
+#endif // DVM_ARCH_GPU
 }
 
 int64_t VectorKernel::TileSizeLimit(int64_t live_peak) {
+#ifdef DVM_ARCH_GPU
+  const int64_t xbuf_mem_size = static_cast<int64_t>(local_mem_size_) - kGpuXbufReserved;
+  int64_t peak_size = ITEM_SIZE[max_type_] * live_peak;
+  return xbuf_mem_size / peak_size;
+#else
   live_peak += static_ops_.size();
   if (comm_op_) {
     live_peak += comm_op_->XbufReserve();
@@ -1369,6 +1498,7 @@ int64_t VectorKernel::TileSizeLimit(int64_t live_peak) {
     }
   }
   return xbuf_mem_size * tile_space / peak_size;
+#endif // DVM_ARCH_GPU
 }
 
 void VKernelS::StaticInit(const std::vector<NDObject *> &objects) {

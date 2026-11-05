@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "isa.h"
-#include "acl/acl_rt.h"
+#include "runtime.h"
 
 namespace dvm {
 inline constexpr size_t MAX_RANK_SIZE = 8;

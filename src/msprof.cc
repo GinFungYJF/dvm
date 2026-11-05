@@ -166,14 +166,4 @@ void MsprofHelper::ReportTask() {
     }
   }
 }
-
-TimeProfiler::TimeProfiler() {
-  ERROR_CHECK(aclrtCreateEventExWithFlag(&start_, ACL_EVENT_TIME_LINE));
-  ERROR_CHECK(aclrtCreateEventExWithFlag(&end_, ACL_EVENT_TIME_LINE));
-}
-
-TimeProfiler::~TimeProfiler() {
-  ERROR_CHECK(aclrtDestroyEvent(start_));
-  ERROR_CHECK(aclrtDestroyEvent(end_));
-}
 }  // namespace dvm

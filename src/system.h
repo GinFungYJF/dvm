@@ -64,11 +64,12 @@ void DvmException(const char *error_str);
     }                      \
   } while (0)
 
-#define __export__  __attribute__((visibility("default")))
+#define DVM_EXPORT __attribute__((visibility("default")))
 
 enum AiCoreArch {
   kAiCore_C220,
   kAiCore_C310,
+  kAiCore_Gpu,
   kAiCoreArchEnd,
 };
 
@@ -127,6 +128,8 @@ enum SocType {
   kAscend950DT_9596,
   kAscend950DT_95A1,
   kAscend950DT_95A2,
+  // GPU
+  kSocGpu,
   kSocUnknow,
 };
 
@@ -255,9 +258,13 @@ class System : public Config {
 
   std::vector<void *> bins_;   // TODO: simt_bin_ && renamed_bin_ add to here
 
+#ifdef DVM_ARCH_GPU
+  static int CodeLaunchGPU(const System &self, const Code *code, void *extern_ws, void *stream);
+#else
   static int CodeLaunchRT(const System &self, const Code *code, void *extern_ws, void *stream);
   static int CodeLaunchACL_C220(const System &self, const Code *code, void *extern_ws, void *stream);
   static int CodeLaunchACL_C310(const System &self, const Code *code, void *extern_ws, void *stream);
+#endif
 };
 
 extern System g_system;

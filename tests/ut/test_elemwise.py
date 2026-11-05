@@ -24,6 +24,7 @@ from tests.mark_utils import arg_mark
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize('op, func', [(Tester.sqrt, np.sqrt), (Tester.abs, np.abs), (Tester.log, np.log), (Tester.exp, np.exp),
                                       (Tester.reciprocal, np.reciprocal)])
+@pytest.mark.gpu
 def test_unary(type, op, func):
     t = Tester()
     a = np.full([32, 1024], 0.5, type)
@@ -37,6 +38,7 @@ def test_unary(type, op, func):
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize('op, func', [(Tester.add, np.add), (Tester.sub, np.subtract), (Tester.div, np.divide),
                                       (Tester.mul, np.multiply), (Tester.maximum, np.maximum), (Tester.minimum, np.minimum)])
+@pytest.mark.gpu
 def test_binary(type, op, func):
     t = Tester()
     a = np.full([32, 1024], 0.5, type)
@@ -55,6 +57,7 @@ def test_binary(type, op, func):
 @pytest.mark.parametrize('type', [np.bool_, np.float16, np.float32])
 @pytest.mark.parametrize("shape", [(1024, 32), (1312, 131), (16, 11), (128, 7), (128, 777)])
 @pytest.mark.parametrize('op, func', [(Tester.logical_or, np.logical_or), (Tester.logical_and, np.logical_and)])
+@pytest.mark.gpu
 def test_logical(type, shape, op, func):
     t = Tester()
     a = np.random.choice([True, False], shape).astype(type)
@@ -71,6 +74,7 @@ def test_logical(type, shape, op, func):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('op, func', [(Tester.logical_or, np.logical_or), (Tester.logical_and, np.logical_and)])
+@pytest.mark.gpu
 def test_logical_mixed_compare_dtype(op, func):
     t = Tester()
     shape = (128, 777)
@@ -92,6 +96,7 @@ def test_logical_mixed_compare_dtype(op, func):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.bool_, np.float16, np.float32, np.int32])
 @pytest.mark.parametrize("shape", [(1024, 32), (1312, 131), (16, 11), (128, 7), (128, 777)])
+@pytest.mark.gpu
 def test_logical_not(type, shape):
     t = Tester()
     a = np.random.choice([True, False], shape).astype(type)
@@ -107,6 +112,7 @@ def test_logical_not(type, shape):
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize('op, func', [(Tester.add, np.add), (Tester.mul, np.multiply), (Tester.div, np.divide),
                                       (Tester.maximum, np.maximum), (Tester.minimum, np.minimum)])
+@pytest.mark.gpu
 def test_binary_s(type, op, func):
     t = Tester()
     a = np.random.normal(0, 1, [32, 1024]).astype(type)
@@ -121,6 +127,7 @@ def test_binary_s(type, op, func):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize('op, func', [(Tester.div, np.divide), (Tester.sub, np.subtract)])
+@pytest.mark.gpu
 def test_binary_s_l(type, op, func):
     t = Tester()
     a = np.random.normal(0.05, 1, [32, 1024]).astype(type)
@@ -135,6 +142,7 @@ def test_binary_s_l(type, op, func):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize("size", [1024, 24, 66666])
+@pytest.mark.gpu
 def test_isfinite(type, size):
     t = Tester()
     random_numbers = np.random.randn(size)
@@ -151,6 +159,7 @@ def test_isfinite(type, size):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
+@pytest.mark.gpu
 def test_repeat_overflow(type):
     repeat = 257
     a = np.full([32 * 64 * repeat], 0.5, type)
@@ -163,6 +172,7 @@ def test_repeat_overflow(type):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
+@pytest.mark.gpu
 def test_scalar(type):
     t = Tester()
     a = np.full([1], 0.4, type)
@@ -193,6 +203,7 @@ def test_cast_int64(shape):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type, eps, shape', [(np.float16, 1e-03, [2, 3, 4, 5]), (np.float32, 1e-05, [1, 1, 4, 5])])
+@pytest.mark.gpu
 def test_scalar_tensor_div(type, eps, shape):
     t = Tester()
     x = t.full(2, shape, type.__name__)
@@ -206,6 +217,7 @@ def test_scalar_tensor_div(type, eps, shape):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('data_type', [np.float16, np.float32])
+@pytest.mark.gpu
 def test_mul1(data_type):
     np.random.seed(1)
     t = Tester()
@@ -221,6 +233,7 @@ def test_mul1(data_type):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
+@pytest.mark.gpu
 def test_pow_1(type):
     t = Tester()
     a = np.array([-2, -3, -4, 0, -2, 9]).astype(type)
@@ -235,6 +248,7 @@ def test_pow_1(type):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize("shape", [(1024, 32), (13, 131), (16, 11), (3, 3)])
+@pytest.mark.gpu
 def test_pow_2(type, shape):
     t = Tester()
     a = 10 * np.random.rand(*shape).astype(type) - 5
@@ -252,6 +266,7 @@ def test_pow_2(type, shape):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize("shape", [(1024, 32), (13, 131)])
 @pytest.mark.parametrize("exponent", [0.0, 1.2, 5.0, -7.0, -3.0])
+@pytest.mark.gpu
 def test_pow_3(shape, exponent):
     t = Tester()
     a = np.abs(np.random.normal(0, 1, shape).astype(np.float32) - 2)
@@ -265,6 +280,7 @@ def test_pow_3(shape, exponent):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type, eps', [(np.float16, 1e-3), (np.float32, 1e-5)])
+@pytest.mark.gpu
 def test_rsqrt(type, eps):
     t = Tester()
     a = np.random.rand(32, 32).astype(type)
@@ -280,6 +296,7 @@ def test_rsqrt(type, eps):
 @pytest.mark.parametrize('op, func',
                          [(Tester.add, np.add), (Tester.sub, np.subtract), (Tester.mul, np.multiply), (Tester.maximum, np.maximum),
                           (Tester.minimum, np.minimum)])
+@pytest.mark.gpu
 def test_binary_int(type, op, func):
     t = Tester()
     a = np.random.randint(low=-2 ** 30, high=2 ** 30, size=(32, 1024)).astype(type)
@@ -384,6 +401,7 @@ def test_int64_mixed_add_sub_cast_le():
 @pytest.mark.parametrize('op, func',
                          [(Tester.add, np.add), (Tester.sub, np.subtract), (Tester.mul, np.multiply), (Tester.maximum, np.maximum),
                           (Tester.minimum, np.minimum)])
+@pytest.mark.gpu
 def test_binarys_int(type, op, func):
     t = Tester()
     a = np.random.randint(low=-2 ** 30, high=2 ** 30, size=(32, 1024)).astype(type)
@@ -397,6 +415,7 @@ def test_binarys_int(type, op, func):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.int32])
+@pytest.mark.gpu
 def test_unary_int(type):
     t = Tester()
     a = np.random.randint(low=-2 ** 30, high=2 ** 30, size=(32, 1024)).astype(type)
@@ -410,6 +429,7 @@ def test_unary_int(type):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('num, expect', [(3, 2), (10, 4), (-8, 3), (11, 5), (15, 6), (20, 5)])
+@pytest.mark.gpu
 def test_power_s(num, expect):
     t = Tester()
     arg = np.random.random([1024, ]).astype(np.float32)
@@ -422,6 +442,7 @@ def test_power_s(num, expect):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float16, np.float32])
+@pytest.mark.gpu
 def test_pow_s_left(type):
     t = Tester()
     a = np.random.normal(0, 1, (1024, 32)).astype(type)
@@ -435,6 +456,7 @@ def test_pow_s_left(type):
 @pytest.mark.parametrize('type', [np.float16, np.float32])
 @pytest.mark.parametrize('op, func', [(Tester.round, np.round), (Tester.ceil, np.ceil), (Tester.floor, np.floor), (Tester.trunc, np.trunc)])
 @pytest.mark.parametrize('shape', [[32, 32], [128 * 256 * 2 * 48]])
+@pytest.mark.gpu
 def test_trunc(type, op, func, shape):
     t = Tester()
     a = np.random.normal(-10, 10, shape).astype(type)
@@ -477,6 +499,7 @@ def test_binarys_bf16(op, func):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('op, func', [(Tester.add, np.add), (Tester.sub, np.subtract), (Tester.div, np.divide),
                                       (Tester.maximum, np.maximum), (Tester.minimum, np.minimum)])
+@pytest.mark.gpu
 def test_binary_scalar_ref(op, func):
     t = Tester('vector:dyn')
     x = t.load([-1], "float32")
@@ -494,6 +517,7 @@ def test_binary_scalar_ref(op, func):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('op, func', [(Tester.add, np.add), (Tester.sub, np.subtract), (Tester.div, np.divide),
                                       (Tester.maximum, np.maximum), (Tester.minimum, np.minimum)])
+@pytest.mark.gpu
 def test_binary_float_scalar_ref(op, func):
     t = Tester('vector:dyn')
     x = t.load([-1], "float32")
@@ -508,6 +532,7 @@ def test_binary_float_scalar_ref(op, func):
         assert (t.check(out, func(d1, i)))
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_bool_cast_eliminate():
     t = Tester()
     a = np.random.choice([True, False], [32, 64]).astype(np.bool_)

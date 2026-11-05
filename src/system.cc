@@ -19,12 +19,16 @@
 #include <stdexcept>
 #include <sstream>
 #include <fstream>
-#include "acl/acl_rt.h"
+#include "runtime.h"
 #include "system.h"
 #include "code.h"
 #include "ops_m.h"
-#include "profiling/prof_api.h"
 #include "pass.h"
+
+#ifdef DVM_ARCH_GPU
+#include "vm_gpu.h"
+#else
+#include "profiling/prof_api.h"
 
 // rts_runtime
 #if defined(__cplusplus)
@@ -51,6 +55,7 @@ rtError_t rtGetC2cCtrlAddr(uint64_t *addr, uint32_t *len);
 #if defined(__cplusplus)
 }
 #endif
+#endif // DVM_ARCH_GPU
 
 namespace elf64 {
 constexpr unsigned char kMagic[4] = {0x7f, 'E', 'L', 'F'};
@@ -212,7 +217,7 @@ class ElfView {
   uint16_t shentsize_;
 };
 
-std::vector<std::pair<std::string, uint64_t>> ParseBinFuncTable(void *bin_data, size_t bin_size) {
+__attribute__((unused)) std::vector<std::pair<std::string, uint64_t>> ParseBinFuncTable(void *bin_data, size_t bin_size) {
   std::vector<std::pair<std::string, uint64_t>> func_table;
   ElfView view(bin_data, bin_size);
   if (!view.Init()) {
@@ -274,6 +279,102 @@ void DvmException(const char *error_str) {
   throw std::runtime_error(oss.str());
 }
 
+#ifdef DVM_ARCH_GPU
+static_assert(sizeof(gpu::VmParam) == PARAM_TABLE_LIMIT, "GpuKernelParam must be exactly PARAM_TABLE_LIMIT");
+
+const char *AiCoreArchName(AiCoreArch arch) { return "Gpu"; }
+const char *SocTypeName(SocType type) { return "Gpu"; }
+
+static int CodeLaunchNone(const System &self, const Code *code, void *extern_ws, void *stream) { return 0; }
+
+int System::CodeLaunchGPU(const System &self, const Code *code, void *extern_ws, void *stream) {
+  ASSERT(code != nullptr && code->data_ != nullptr && code->data_size_ > 0 && code->block_dim_ > 0);
+  if (!Code::IsVector(code->target_)) {
+    DvmException("GPU backend only supports vector kernels");
+  }
+  gpu::VmParam param{};
+  if (code->data_size_ <= PARAM_TABLE_LIMIT) {
+    std::memcpy(param.code, code->data_, code->data_size_);
+    return gpu::LaunchVM(param, code->block_dim_, stream);
+  }
+  EXCEPTION_IF(extern_ws == nullptr, "gpu external code requires workspace");
+  auto ret = cudaMemcpyAsync(extern_ws, code->data_, code->data_size_, cudaMemcpyHostToDevice,
+                             reinterpret_cast<cudaStream_t>(stream));
+  if (ret != cudaSuccess) {
+    return static_cast<int>(ret);
+  }
+  auto host_head = reinterpret_cast<uint64_t *>(code->data_);
+  param.code[0] = reinterpret_cast<uint64_t>(extern_ws);
+  param.code[1] = host_head[1] | V_ENTRY_FLAG_EXTERN_CODE;
+  return gpu::LaunchVM(param, code->block_dim_, stream);
+}
+
+void System::GetSocConfig() {
+  int device_id = 0;
+  auto err = rt::GetDevice(&device_id);
+  EXCEPTION_IF(err != 0, "cudaGetDevice failed");
+  cudaDeviceProp prop;
+  err = static_cast<int>(cudaGetDeviceProperties(&prop, device_id));
+  EXCEPTION_IF(err != 0, "cudaGetDeviceProperties failed");
+  soc_name_ = kSocGpu;
+  arch_ = kAiCore_Gpu;
+  cube_core_num_ = static_cast<uint64_t>(prop.multiProcessorCount);
+  l2_size_ = static_cast<uint64_t>(prop.l2CacheSize);
+  l2_ddr_bandwidth_ratio_ = 5.0f;
+}
+
+void System::DoInit() {
+  GetSocConfig();
+  event_num_ = 8;
+  vector_core_num_ = cube_core_num_;
+  l1_size_ = 512 * 1024;
+  cube_store_type_ = kCubeStoreUB;
+  bt_size_ = 4096;
+  ub_workspace_size_ = 256;
+  l0c_size_ = 256 * 1024;
+  local_mem_size_ = 256 * 1024;
+  l2_cache_line_size_ = 128;
+
+  static uint64_t gpu_func_offset[V_ACCESS_NONE + V_NONE + V_VISIT_NONE];
+  std::memset(gpu_func_offset, 0xff, sizeof(gpu_func_offset));
+  uint64_t *access_funcs = gpu_func_offset;
+  uint64_t *simd_funcs = &gpu_func_offset[V_ACCESS_NONE];
+  uint64_t *visit_funcs = &gpu_func_offset[V_ACCESS_NONE + V_NONE];
+#define GPU_VM_SET_ACCESS(op, host) access_funcs[host] = gpu::op;
+  GPU_VM_ACCESS_OPS(GPU_VM_SET_ACCESS)
+#undef GPU_VM_SET_ACCESS
+#define GPU_VM_SET_SIMD(op, host) simd_funcs[host] = gpu::op;
+  GPU_VM_SIMD_OPS(GPU_VM_SET_SIMD)
+#undef GPU_VM_SET_SIMD
+  g_access_func_offset_ = access_funcs;
+  g_simd_func_offset_ = simd_funcs;
+  g_visit_func_offset_ = visit_funcs;
+
+  int device_id = 0;
+  if (rt::GetDevice(&device_id) != 0) {
+    code_launch_ = CodeLaunchNone;
+    return;
+  }
+  cudaDeviceProp prop;
+  auto err = cudaGetDeviceProperties(&prop, device_id);
+  EXCEPTION_IF(err != cudaSuccess, "cudaGetDeviceProperties failed");
+  cube_core_num_ = static_cast<uint64_t>(prop.multiProcessorCount);
+  constexpr uint64_t blocks_per_sm = 2;
+  vector_core_num_ = static_cast<uint64_t>(prop.multiProcessorCount) * blocks_per_sm;
+
+  uint64_t optin = static_cast<uint64_t>(prop.sharedMemPerBlockOptin) & ~0x3ffull;
+  uint64_t max_ub = optin > 256 * 1024 ? 256 * 1024 : optin;
+  local_mem_size_ = (max_ub / blocks_per_sm) & ~0x3ffull;
+  EXCEPTION_IF(local_mem_size_ <= ub_workspace_size_, "GPU local memory size is too small");
+  if (gpu::InitVM(local_mem_size_) != 0) {
+    DvmException("configure gpu vm failed");
+  }
+  inited_ = true;
+  pass_opt_ = pass::CreateOptimizer(arch_);
+  code_launch_ = CodeLaunchGPU;
+}
+
+#else
 using ProfCommandHandle = int32_t (*)(uint32_t type, VOID_PTR data, uint32_t len);
 int32_t ProfCommandHandler(uint32_t type, VOID_PTR data, uint32_t len) {
   if (data == nullptr) {
@@ -681,6 +782,7 @@ void System::DoInit() {
   EXCEPTION_IF(err != ACL_SUCCESS, "reg mix failed");
   code_launch_ = arch_ == kAiCore_C220 ? CodeLaunchACL_C220 : CodeLaunchACL_C310;
 }
+#endif // DVM_ARCH_GPU
 
 System::~System() {
   delete pass_opt_;
@@ -715,6 +817,11 @@ void System::RegCustom(const std::string &nspace, const std::string &so_path, co
 }
 
 void System::RegCustom(const std::string &nspace, const std::string &bin_path) {
+#ifdef DVM_ARCH_GPU
+  (void)nspace;
+  (void)bin_path;
+  DvmException("register custom binary is not supported on GPU backend yet");
+#else
   const std::string nspace_prefix = nspace + "/";
 
   std::ifstream fin(bin_path, std::ios::binary | std::ios::ate);
@@ -750,6 +857,7 @@ void System::RegCustom(const std::string &nspace, const std::string &bin_path) {
   for (const auto &entry : func_table) {
     custom_funcs_[nspace_prefix + entry.first] = reinterpret_cast<uint64_t>(aiv_addr) + entry.second;
   }
+#endif // DVM_ARCH_GPU
 }
 
 uint64_t System::GetCustomFunc(const std::string &full_name) const {

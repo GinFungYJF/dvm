@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#define _CCE_KERNEL_
+#define _VM_KERNEL_
 #define __VM_ARCH__ 220
 #include "vm_aic.h"
 

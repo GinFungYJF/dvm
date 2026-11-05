@@ -276,6 +276,9 @@ void copy_gm_to_ubuf_align_b8(void *dst, void *src, uint8_t sid, uint16_t nBurst
 } // end namespace
 
 void DryLaunch(Code *code, void *workspace, void *stream, uint64_t core_idx, bool is_cube) {
+  if (g_system.Arch() != kAiCore_C220) {
+    DvmException("dry run only supports C220");
+  }
   g_cube_core = is_cube;
   g_subblocknum = Code::IsVector(code->target_) ? 1 : 2;
   if (is_cube) {

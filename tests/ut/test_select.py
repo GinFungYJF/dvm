@@ -23,6 +23,7 @@ from tests.mark_utils import arg_mark
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize("shape", [(1024, 32), (13, 131), (16, 11), (3, 3)])
 @pytest.mark.parametrize('type', [np.float32, np.float16, np.int32])
+@pytest.mark.gpu
 def test_select(shape, type):
     t = Tester()
     a = np.random.randint(1024, size=shape).astype(type)
@@ -42,6 +43,7 @@ def test_select(shape, type):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_select_fp32_compare_no_cast():
     t = Tester()
     shape = (128, 777)
@@ -63,6 +65,7 @@ def test_select_fp32_compare_no_cast():
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.float32, np.float16, np.int32])
+@pytest.mark.gpu
 def test_select_broadcast(type):
     t = Tester()
     a = np.random.randint(1024, size=(1, 10, 1, 1, 50)).astype(type)
@@ -84,6 +87,7 @@ def test_select_broadcast(type):
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize("shape", [(1024, 32), (13, 131), (16, 11), (3, 3)])
 @pytest.mark.parametrize('type, eps', [(np.float32, 1e-5), (np.float16, 1e-3)])
+@pytest.mark.gpu
 def test_select_bool_input(shape, type, eps):
     t = Tester()
     a = np.random.rand(*shape).astype(type)
@@ -98,6 +102,7 @@ def test_select_bool_input(shape, type, eps):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_select_scalar():
     t = Tester()
     a = np.random.randint(1024, size=(1024, 10)).astype(np.float16)

@@ -311,6 +311,7 @@ def test_eager_mix_vec_reuse():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_extern_code():
     t = Tester("eager")
     ax = np.random.normal(0, 0.1, [512, 512]).astype(np.float32)

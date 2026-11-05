@@ -440,7 +440,7 @@ class VectorKernel;
 #define OBJ_FLAG_VIEW_LOAD_FRACTAL_ROW_MAJOR (1u << 28)
 #define OBJ_FLAG_REDUCE_RMPAD_EN (1u << 30)
 
-class __export__ NDObject {
+class DVM_EXPORT NDObject {
  public:
   NDObject(NDObject *lhs, NDObject *rhs, DataType type_id, ObjectType obj_id) : lhs_(lhs), rhs_(rhs), obj_id_(obj_id) {
     type_id_ = type_id;
@@ -717,7 +717,7 @@ class NDPadStore : public NDViewStore {
   int64_t pad_size_;
 };
 
-class __export__ FlexOp : public NDObject {
+class DVM_EXPORT FlexOp : public NDObject {
  public:
   struct Xhs {
     int in_num;
@@ -1358,7 +1358,7 @@ class OneHotOp : public NDObject {
   ShapeWithRef shape_;
 };
 
-class __export__ ExtOutOp : public NDObject {
+class DVM_EXPORT ExtOutOp : public NDObject {
  public:
   ExtOutOp(NDObject *input) : NDObject(input, nullptr, input->type_id_, kExtOut) {}
   uint64_t Emit(VectorKernel &k) override;
@@ -1366,7 +1366,7 @@ class __export__ ExtOutOp : public NDObject {
   NDObject *Clone(CloneHelper &h) override;
 };
 
-class __export__ CustomOp : public FlexOp {
+class DVM_EXPORT CustomOp : public FlexOp {
  public:
   struct XOut {
     int out_num;

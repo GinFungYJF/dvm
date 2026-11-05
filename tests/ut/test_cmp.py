@@ -26,6 +26,7 @@ from tests.mark_utils import arg_mark
 @pytest.mark.parametrize('op, func', [(Tester.equal, np.equal), (Tester.less, np.less), (Tester.greater, np.greater),
                                       (Tester.greater_equal, np.greater_equal), (Tester.less_equal, np.less_equal),
                                       (Tester.not_equal, np.not_equal)])
+@pytest.mark.gpu
 def test_cmp(shape, type, op, func):
     t = Tester()
     a = np.random.randint(1024, size=shape).astype(type)
@@ -48,6 +49,7 @@ def test_cmp(shape, type, op, func):
 @pytest.mark.parametrize('op, func', [(Tester.equal, np.equal), (Tester.less, np.less), (Tester.greater, np.greater),
                                       (Tester.greater_equal, np.greater_equal), (Tester.less_equal, np.less_equal),
                                       (Tester.not_equal, np.not_equal)])
+@pytest.mark.gpu
 def test_cmp_s_r(type, op, func):
     t = Tester()
     a = np.random.randint(1024, size=(1024, 32)).astype(type)
@@ -67,6 +69,7 @@ def test_cmp_s_r(type, op, func):
 @pytest.mark.parametrize('op, func', [(Tester.equal, np.equal), (Tester.less, np.less), (Tester.greater, np.greater),
                                       (Tester.greater_equal, np.greater_equal), (Tester.less_equal, np.less_equal),
                                       (Tester.not_equal, np.not_equal)])
+@pytest.mark.gpu
 def test_cmp_s_l(type, op, func):
     t = Tester()
     a = np.random.randint(1024, size=(1024, 32)).astype(type)
@@ -81,6 +84,7 @@ def test_cmp_s_l(type, op, func):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('op, func', [(Tester.equal, np.equal), (Tester.not_equal, np.not_equal)])
+@pytest.mark.gpu
 def test_cmp_over_repeat(op, func):
     t = Tester()
     a = np.random.randint(1024, size=(100000, 1)).astype(np.float16)
@@ -96,6 +100,7 @@ def test_cmp_over_repeat(op, func):
 @pytest.mark.parametrize('op, func', [(Tester.equal, np.equal), (Tester.less, np.less), (Tester.greater, np.greater),
                                       (Tester.greater_equal, np.greater_equal), (Tester.less_equal, np.less_equal),
                                       (Tester.not_equal, np.not_equal)])
+@pytest.mark.gpu
 def test_cmp_int(op, func):
     t = Tester()
     a = np.random.randint(-2147483648, 2147483647, (1024, 1024)).astype(np.int32)
@@ -108,6 +113,7 @@ def test_cmp_int(op, func):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_cmp_ws_inplace():
     t = Tester()
     a = np.random.randint(1024, size=(32, 512)).astype(np.float16)
@@ -122,6 +128,7 @@ def test_cmp_ws_inplace():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_cmp_s_ws_inplace():
     t = Tester()
     a = np.random.randint(1024, size=(32, 512)).astype(np.float16)
@@ -149,6 +156,7 @@ def test_cmp_bf16(op, func):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_cmp_repeat_overflow():
     t = Tester()
     a = np.random.normal(-1, 1, [2048, 9]).astype(np.float16)
@@ -235,6 +243,7 @@ def test_cmp_int64_s_l(op, func):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_sequential_run_with_different_kernel_args():
     def run_copy(dtype):
         t = Tester()

@@ -18,7 +18,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
-#include "acl/acl_rt.h"
+#include "runtime.h"
 #include "code.h"
 #include "ops.h"
 
@@ -1533,8 +1533,8 @@ void Code::Alloc(size_t size) {
   } else {
     constexpr uint32_t RT_MEM_ALIGN = 1024 * 1024;
     size = (size + RT_MEM_ALIGN - 1) / RT_MEM_ALIGN * RT_MEM_ALIGN;
-    auto ret = aclrtMallocHost(reinterpret_cast<void **>(&data_), size);
-    EXCEPTION_IF(ret != 0, "Alloc aclrtMallocHost error");
+    auto ret = rt::MallocHost(reinterpret_cast<void **>(&data_), size);
+    EXCEPTION_IF(ret != 0, "Alloc host memory error");
   }
   mem_size_ = size;
 }
@@ -1543,8 +1543,8 @@ void Code::Free() {
   if (mem_size_ <= PARAM_TABLE_LIMIT) {
     std::free(data_);
   } else {
-    auto ret = aclrtFreeHost(data_);
-    EXCEPTION_IF(ret != 0, "aclrtFreeHost error");
+    auto ret = rt::FreeHost(data_);
+    EXCEPTION_IF(ret != 0, "free host memory error");
   }
 }
 

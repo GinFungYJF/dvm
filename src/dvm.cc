@@ -1128,6 +1128,7 @@ Comm::~Comm() {
 }
 
 bool Comm::Init(int rank_id, int rank_size, int comm_type, const uint32_t *group_ranks) {
+#ifndef DVM_ARCH_GPU
   if (comm_) {
     delete comm_;
   }
@@ -1141,14 +1142,17 @@ bool Comm::Init(int rank_id, int rank_size, int comm_type, const uint32_t *group
     ASSERT(comm_type == Comm::kDummy);
     comm_ = new DummyComm(rank_id, rank_size);
   }
+#endif
   return true;
 }
 
 void Comm::Init(void *hccl_comm) {
+#ifndef DVM_ARCH_GPU
   if (comm_) {
     delete comm_;
   }
   comm_ = new HcclComm(hccl_comm);
+#endif
 }
 
 Kernel::Kernel() : kernel_{nullptr} {}

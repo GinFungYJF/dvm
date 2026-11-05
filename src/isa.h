@@ -19,13 +19,29 @@
 
 #include <stdint.h>
 
-#ifdef _CCE_KERNEL_
+#ifdef _VM_KERNEL_
+#ifdef DVM_ARCH_GPU
+#define __gm__
+#define __bcode__
+#ifdef __CUDACC__
+#define __aicore_inline__ static __device__ __forceinline__
+#define bcodeptr_t __bcode__ uint64_t *__restrict__
+#ifndef __force_inline__
+#define __force_inline__ __device__ __forceinline__
+#endif
+#else
+#define __aicore_inline__ static inline
+#define bcodeptr_t uint64_t *
+#endif
+#define __aicore__
+#else
 #define __aicore_inline__ static[aicore] __attribute__((always_inline))
 #define __bcode__ __gm__
 #define bcodeptr_t __bcode__ uint64_t *__restrict__
 #ifndef __aicore__
 #define __aicore__ [aicore]
 #endif
+#endif  // DVM_ARCH_GPU
 #else
 #define __gm__
 #define __bcode__
@@ -35,7 +51,7 @@
 #endif
 #ifndef __force_inline__
 #define __force_inline__ inline __attribute__((always_inline))
-#endif 
+#endif
 
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -306,7 +322,7 @@ enum vAtomicType {
 #define vCompactX(x) ((x) >> 5)
 #define vDeCompactX(x) ((x) << 5)
 
-#ifndef _CCE_KERNEL_
+#ifndef _VM_KERNEL_
 #include "system.h"
 __aicore_inline__ uint64_t vMakeAccHead(uint64_t id, uint64_t ext, uint64_t len) {
   return ext << V_M_HEAD_EXT_OFFSET | len << V_M_HEAD_SIZE_OFFSET |
@@ -321,8 +337,8 @@ __aicore_inline__ T min(T a, T b) {
   return a < b ? a : b;
 }
 #else
-__aicore_inline__ uint64_t vMakeAccHead(uint64_t id, uint64_t ext, uint64_t len) { return 0; }
-__aicore_inline__ uint64_t vMakeSimdHead(uint64_t id, uint64_t ext, uint64_t len) { return 0; }
+__aicore_inline__ uint64_t vMakeAccHead(uint64_t, uint64_t, uint64_t) { return 0; }
+__aicore_inline__ uint64_t vMakeSimdHead(uint64_t, uint64_t, uint64_t) { return 0; }
 #endif
 
 __aicore_inline__ uint64_t vGetBitRange(uint64_t x, uint64_t offset, uint64_t len) {

@@ -24,6 +24,7 @@ from tests.mark_utils import arg_mark
     ([256], [256], [1024]),
     ([8192 * 2], [8192 * 4], [4096])
 ])
+@pytest.mark.gpu
 def test_basic(shape1, shape2, shape3):
     t = Tester("parallel")
     # kernel 0

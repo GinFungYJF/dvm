@@ -24,20 +24,24 @@
 #include <memory>
 #include <fstream>
 #include "pybind11/numpy.h"
-#include "acl/acl_rt.h"
-#include "acl/acl_prof.h"
+#include "runtime.h"
 #include "kernel.h"
 #include "pybind_api.h"
 #include "msprof.h"
 #include "xkernel.h"
+#ifndef DVM_ARCH_GPU
+#include "acl/acl_prof.h"
+#endif
 
 namespace dvm {
-namespace {
-const size_t TEST_NUM = 10;
-}  // namespace
-
 class ProfileMgr {
  public:
+#ifdef DVM_ARCH_GPU
+  ProfileMgr(const std::string &, const std::string &) {}
+  ~ProfileMgr() = default;
+  void ProfStart() {}
+  void ProfStop() {}
+#else
   ProfileMgr(const std::string &path, const std::string &metric) {
     static const std::unordered_map<std::string, aclprofAicoreMetrics> aicore_metrics = {
       {"ArithmeticUtilization", ACL_AICORE_ARITHMETIC_UTILIZATION},
@@ -65,9 +69,14 @@ class ProfileMgr {
 
  private:
   aclprofConfig *acl_config_;
+#endif // DVM_ARCH_GPU
 };
+}
 
+namespace dvm {
 namespace {
+const size_t TEST_NUM = 10;
+
 inline void F32ToBF16(float *input, uint16_t *output, uint32_t size) {
   while (size-- != 0) {
     *output++ = BFloat16(*input++).int_value();
@@ -101,7 +110,7 @@ std::vector<int64_t> GetVector(py::object shape) {
 inline void ResetStoreMemory(const std::vector<RtKernelPy::StoreInfo> &stores) {
   for (auto &info : stores) {
     auto buf = info.host.request();
-    ERROR_CHECK(aclrtMemcpy(info.dev, info.size, buf.ptr, info.size, ACL_MEMCPY_HOST_TO_DEVICE));
+    ERROR_CHECK(rt::MemToDev(info.dev, buf.ptr, info.size));
   }
 }
 
@@ -193,24 +202,23 @@ class DevRunner : public KernelRunner {
     dev_id = 0;
 #else
     uint32_t dev_count = 0;
-    ERROR_CHECK(aclrtGetDeviceCount(&dev_count));
+    ERROR_CHECK(rt::GetDeviceCount(&dev_count));
     ASSERT(static_cast<uint32_t>(dev_id) < dev_count);
 #endif
-    ERROR_CHECK(aclrtSetDevice(dev_id));
-    ERROR_CHECK(
-      aclrtCreateStreamWithConfig(&stream_, 0, ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC));
+    ERROR_CHECK(rt::SetDevice(dev_id));
+    ERROR_CHECK(rt::CreateStream(&stream_));
     dev_id_ = dev_id;
   }
   ~DevRunner() override {
     Reset();
-    aclrtDestroyStream(stream_);
+    rt::DestroyStream(stream_);
   }
 
   void AllocLoad(const py::buffer_info &buf, LoadInfo &load) override {
     size_t size = buf.itemsize * buf.size;
     if (size == 0) return;
-    ERROR_CHECK(aclrtMalloc(&load.dev, size, ACL_MEM_TYPE_HIGH_BAND_WIDTH));
-    ERROR_CHECK(aclrtMemcpy(load.dev, size, buf.ptr, size, ACL_MEMCPY_HOST_TO_DEVICE));
+    ERROR_CHECK(rt::Malloc(&load.dev, size));
+    ERROR_CHECK(rt::MemToDev(load.dev, buf.ptr, size));
     dev_mem_.push_back(load.dev);
   }
 
@@ -218,10 +226,10 @@ class DevRunner : public KernelRunner {
     if (store.size == 0) return;
     auto buf = store.host.request();
     const uint64_t reserve_mem = 512;
-    ERROR_CHECK(aclrtMalloc(&store.dev, store.size + reserve_mem, ACL_MEM_TYPE_HIGH_BAND_WIDTH));
+    ERROR_CHECK(rt::Malloc(&store.dev, store.size + reserve_mem));
     if (store.clear_mem || store.set_host) {
       std::memset(buf.ptr, 0, store.size);
-      ERROR_CHECK(aclrtMemcpy(store.dev, store.size, buf.ptr, store.size, ACL_MEMCPY_HOST_TO_DEVICE));
+      ERROR_CHECK(rt::MemToDev(store.dev, buf.ptr, store.size));
     }
     dev_mem_.push_back(store.dev);
   }
@@ -229,7 +237,7 @@ class DevRunner : public KernelRunner {
   void *Alloc(size_t size) override {
     void *ws = nullptr;
     if (size > 0) {
-      ERROR_CHECK(aclrtMalloc(&ws, size, ACL_MEM_TYPE_HIGH_BAND_WIDTH));
+      ERROR_CHECK(rt::Malloc(&ws, size));
       dev_mem_.push_back(ws);
     }
     return ws;
@@ -238,7 +246,7 @@ class DevRunner : public KernelRunner {
   void Release(void *mem) override {
     auto iter = std::find(dev_mem_.begin(), dev_mem_.end(), mem);
     if (iter == dev_mem_.end()) return;
-    aclrtFree(mem);
+    rt::Free(mem);
     dev_mem_.erase(iter);
   }
 
@@ -248,12 +256,12 @@ class DevRunner : public KernelRunner {
     } else {
       ERROR_CHECK(kernel.Launch(nullptr, 0, workspace, stream_));
     }
-    return sync ? aclrtSynchronizeStream(stream_) : 0;
+    return sync ? rt::SynchronizeStream(stream_) : 0;
   }
 
   void Reset() override {
     for (auto mem : dev_mem_) {
-      ERROR_CHECK(aclrtFree(mem));
+      (void)rt::Free(mem);
     }
     dev_mem_.clear();
   }
@@ -263,7 +271,6 @@ class DevRunner : public KernelRunner {
 };
 
 void DryLaunch(Code *code, void *workspace, void *stream, uint64_t core_idx, bool is_cube);
-
 class DryRunner : public KernelRunner {
  public:
   DryRunner(int core_id) : core_id_(core_id) {}
@@ -791,7 +798,7 @@ py::object RtKernelPy::Msprof(const std::string &path, int64_t test_num, const s
       ERROR_CHECK(kernel_.Launch(relocs.data(), relocs.size(), workspace_, runner_->Stream()));
     }
   }
-  aclrtSynchronizeStream(runner_->Stream());
+  rt::SynchronizeStream(runner_->Stream());
   mgr.ProfStop();
   return py::none();
 }
@@ -852,7 +859,7 @@ py::object RtKernelPy::Output(py::object store) {
   if (info.size > 0) {
     ASSERT(info.dev);
     auto buf = info.host.request();
-    ERROR_CHECK(aclrtMemcpy(buf.ptr, info.size, info.dev, info.size, ACL_MEMCPY_DEVICE_TO_HOST));
+    ERROR_CHECK(rt::MemFromDev(buf.ptr, info.dev, info.size));
   }
   return info.host;
 }
@@ -1007,7 +1014,7 @@ INIT_COMM:
   int rank_id = g_mpc.rank_id;
   g_mpc.bars = (int64_t *)shmat(g_mpc.shmid, nullptr, 0);
   g_mpc.bars[rank_id] = 0;
-  ERROR_CHECK(aclrtSetDevice(rank_id));
+  ERROR_CHECK(rt::SetDevice(rank_id));
   g_mpc.comm.Init(rank_id, size);
 }
 

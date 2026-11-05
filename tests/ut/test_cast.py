@@ -19,6 +19,9 @@ from dvm.tester import Tester
 from tests.mark_utils import arg_mark
 
 
+pytestmark = pytest.mark.gpu
+
+
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type1, type2, eps', [(np.float16, np.float32, 1e-3), (np.float32, np.float16, 1e-3),
                                                (np.float16, np.int32, 0), (np.int32, np.float32, 1e-5),

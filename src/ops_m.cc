@@ -18,7 +18,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
-#include "acl/acl_rt.h"
+#include "runtime.h"
 #include "kernel.h"
 #include "xkernel.h"
 #include "msprof.h"
@@ -825,9 +825,9 @@ void OnlineCubeTuner::GenTile(CubeOp *op, vCubeOp *code) {
   TuningInfo &best_tuning = tuning_table[GenKey(op, code)];
   if (best_tuning.swizzle == 0) {
     void *dev_M_, *dev_N_, *dev_O_;
-    ERROR_CHECK(aclrtMalloc(&dev_M_, op->lhs_->Size() + 512, ACL_MEM_TYPE_HIGH_BAND_WIDTH));
-    ERROR_CHECK(aclrtMalloc(&dev_N_, op->rhs_->Size() + 512, ACL_MEM_TYPE_HIGH_BAND_WIDTH));
-    ERROR_CHECK(aclrtMalloc(&dev_O_, op->Size() + 512, ACL_MEM_TYPE_HIGH_BAND_WIDTH));
+    ERROR_CHECK(rt::Malloc(&dev_M_, op->lhs_->Size() + 512));
+    ERROR_CHECK(rt::Malloc(&dev_N_, op->rhs_->Size() + 512));
+    ERROR_CHECK(rt::Malloc(&dev_O_, op->Size() + 512));
     TuneData td;
     td.kernel.Reset(KernelType::kCube, 0);
     auto m_input = td.kernel.Load(dev_M_, op->lhs_->shape_ref_, DataType::kFloat16);
@@ -839,9 +839,9 @@ void OnlineCubeTuner::GenTile(CubeOp *op, vCubeOp *code) {
     (void)td.kernel.Store(dev_O_, matmul);
     TileV3(td, op, code);
     best_tuning = td.best_para;
-    aclrtFree(dev_M_);
-    aclrtFree(dev_N_);
-    aclrtFree(dev_O_);
+    rt::Free(dev_M_);
+    rt::Free(dev_N_);
+    rt::Free(dev_O_);
   }
   code->m0 = op->m0_ = best_tuning.m0;
   code->n0 = op->n0_ = best_tuning.n0;
@@ -880,9 +880,8 @@ void OnlineCubeTuner::TileV3(TuneData &td, CubeOp *mm, vCubeOp *op) {
 }
 
 void OnlineCubeTuner::Tuning(TuneData &td, const TuningInfo &parameter) {
-  aclrtStream stream;
-  ERROR_CHECK(
-    aclrtCreateStreamWithConfig(&stream, 0, ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC));
+  rt::Stream stream;
+  ERROR_CHECK(rt::CreateStream(&stream));
   ManualCubeTuner tuner(parameter);
   static_cast<MixKernel *>(td.kernel.GetImpl())->SetTuner(&tuner);
   td.kernel.CodeGen();
@@ -894,7 +893,7 @@ void OnlineCubeTuner::Tuning(TuneData &td, const TuningInfo &parameter) {
     ERROR_CHECK(td.kernel.Launch(nullptr, 0, nullptr, stream));
     profiler.RecordEnd(stream);
   }
-  ERROR_CHECK(aclrtDestroyStream(stream));
+  ERROR_CHECK(rt::DestroyStream(stream));
   auto mean_time = (profiler.total_us_ - profiler.min_us_ - profiler.max_us_) / (test_num - 2);
   if (mean_time < td.best_time) {
     td.best_time = mean_time;
