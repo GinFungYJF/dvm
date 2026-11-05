@@ -2397,9 +2397,7 @@ void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAlloc
     ctx_->kill_.clear();
   }
   kernel_begin_ = kernel_begin;
-  if (extern_code_size) {
-    extern_code_ = ws_alloc->Alloc(extern_code_size);
-  }
+  extern_code_ = extern_code_size ? ws_alloc->Alloc(extern_code_size) : nullptr;
 }
 
 CubeOp *_SplitKernel::GetCubeOp(EagerVector *kernel) { return kernel->mm_; }
@@ -2568,6 +2566,10 @@ void _SplitKernel::SlotCodeGen(const RelocEntry *relocs, size_t reloc_size) {
   code_.Clear();
   SlotWsAllocator slot_alloc(ctx_->slot_ws_);
   _SplitKernel::CodeGenR(relocs, reloc_size, &slot_alloc);
+  if (extern_code_) {
+    // extern_code_ shares storage with pv_black_mask_. Relocate the code workspace too.
+    add_reloc(pv_black_mask_);
+  }
   for (int i = kernel_begin_; i < kernel_used_; ++i) {
     auto kernel = kernels_[i];
     if (auto mm = kernel->mm_) {

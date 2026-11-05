@@ -20,6 +20,27 @@ from tests.mark_utils import arg_mark
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.parametrize('mode', ["split", "split:unify_ws", "split:dyn", "split:dyn,unify_ws"])
+def test_split_extern_code(mode):
+    t = Tester(mode)
+    ax = np.random.normal(0, 0.1, [512, 512]).astype(np.float32)
+    bx = np.full([1, 512], 0.01, np.float32)
+    a = t.load([512, 512], "float32")
+    b = t.load([1, 512], "float32")
+    x = a
+    for _ in range(200):
+        x = t.add(x, b)
+    out = t.store(x)
+    for offset in (0.0, 0.1):
+        data = ax + offset
+        t.input(a, data)
+        t.input(b, bx)
+        t.run()
+        assert (t.check(out, data + 0.01 * 200))
+        t.reset()
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('mode', ["split", "split:unify_ws"])
 def test_split_static_vec(mode):
     t = Tester(mode)
