@@ -38,6 +38,10 @@ CCE_FLGAS_C310 = --std=c++17 -Wno-int-to-pointer-cast\
                  -mllvm -cce-aicore-jump-expand=true \
                  -mllvm -cce-aicore-mask-opt=false \
                  -mllvm -cce-aicore-dcci-insert-for-scalar=false
+
+ASCENDC_FLAGS = -I${ASCEND_HOME_PATH}/asc -I${ASCEND_HOME_PATH}/asc/include \
+                -I${ASCEND_HOME_PATH}/asc/include/basic_api -I${ASCEND_HOME_PATH}/asc/impl/basic_api
+
 ifneq ($(DVM_SOC_SIMU),)
 LD_FLAGS = -L${ASCEND_HOME_PATH}/tools/simulator/${DVM_SOC_SIMU}/lib -lruntime_camodel -L${ASCEND_HOME_PATH}/lib64 -lascendcl
 CFLAGS += -DVK_SIM_MODEL
@@ -129,7 +133,7 @@ vm_aic_c220.o: vm_aic.cce isa.h vm_aic.h
 	ccec -c -O2 $(CCE_FLGAS_C220) --cce-aicore-arch=dav-c220-cube src/vm_aic.cce -o vm_aic_c220.o
 
 vm_aiv_c310.o: vm_aiv_c310.cce isa.h vm_aiv.h vm_aic_c310.o
-	ccec -c -O2 $(CCE_FLGAS_C310) -D VMAIN_OFFSET=$(VMAIN_C310_OFFSET) --cce-aicore-arch=dav-c310-vec src/vm_aiv_c310.cce -o vm_aiv_c310.o
+	ccec -c -O2 $(CCE_FLGAS_C310) $(ASCENDC_FLAGS) -D VMAIN_OFFSET=$(VMAIN_C310_OFFSET) --cce-aicore-arch=dav-c310-vec src/vm_aiv_c310.cce -o vm_aiv_c310.o
 
 vm_aic_c310.o: vm_aic_c310.cce isa.h vm_aic.h
 	ccec -c -O2 $(CCE_FLGAS_C310) --cce-aicore-arch=dav-c310-cube src/vm_aic_c310.cce -o vm_aic_c310.o

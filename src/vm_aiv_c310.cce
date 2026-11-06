@@ -15,33 +15,32 @@
  */
 #define _VM_KERNEL_
 #define __VM_ARCH__ 310
+#define TILING_KEY_VAR 0UL
+#include "reg_compute/kernel_reg_compute_maskreg_intf.h"
+#include "reg_compute/kernel_reg_compute_vec_vconv_intf.h"
 #include "vm_aiv.h"
 
+using AscendC::RoundMode;
+using AscendC::MicroAPI::Cast;
+using AscendC::MicroAPI::CastTrait;
+using AscendC::MicroAPI::CreateMask;
+using AscendC::MicroAPI::MaskMergeMode;
+using AscendC::MicroAPI::MaskReg;
+using AscendC::MicroAPI::MoveMask;
+using AscendC::MicroAPI::RegLayout;
+using AscendC::MicroAPI::SatMode;
+using AscendC::MicroAPI::Truncate;
+
+// RegTensor<int64_t> -> AscendC::MicroAPI::RegTensor<int64_t, RegTraitNumTwo>
 template <typename T>
-struct TypeGet;
+using RegTensor = AscendC::MicroAPI::RegTensor<
+  T, std::is_same<T, int64_t>::value ? AscendC::MicroAPI::RegTraitNumTwo : AscendC::MicroAPI::RegTraitNumOne>;
 
-#define DEF_TYPE_GET(stype, vtype) \
-  template <>                      \
-  struct TypeGet<stype> {          \
-    using T = vtype;               \
-  };
-
-DEF_TYPE_GET(uint32_t, vector_u32)
-DEF_TYPE_GET(int32_t, vector_s32)
-DEF_TYPE_GET(int64_t, vector_2xvl_s64)
-DEF_TYPE_GET(uint16_t, vector_u16)
-DEF_TYPE_GET(int16_t, vector_s16)
-DEF_TYPE_GET(float, vector_f32)
-DEF_TYPE_GET(half, vector_f16)
-DEF_TYPE_GET(bfloat16_t, vector_bf16)
-DEF_TYPE_GET(uint8_t, vector_u8)
-DEF_TYPE_GET(int8_t, vector_s8)
-DEF_TYPE_GET(bool, vector_s8)
-
+// UpdateMask<int64_t> -> AscendC::MicroAPI::UpdateMask<int64_t, RegTraitNumTwo>
 template <typename T>
-using RegTensor = typename TypeGet<T>::T;
-
-using MaskReg = vector_bool;
+__simd_callee__ __aicore_inline__ MaskReg UpdateMask(uint32_t &count) {
+  return AscendC::MicroAPI::UpdateMask<T, RegTensor<T>::trait>(count);
+}
 
 template <size_t N>
 struct SizeToUint;
@@ -57,50 +56,8 @@ using UintFor = typename SizeToUint<sizeof(T)>::type;
 
 constexpr uint32_t kSimtThreadNum = 2048;
 
-template <typename T>
-__aicore_inline__ MaskReg UpdateMask(uint32_t &scalar) {
-  MaskReg reg;
-  if constexpr (sizeof(T) == 1) {
-    reg = plt_b8(scalar, POST_UPDATE);
-  } else if constexpr (sizeof(T) == 2) {
-    reg = plt_b16(scalar, POST_UPDATE);
-  } else if constexpr (sizeof(T) == 4) {
-    reg = plt_b32(scalar, POST_UPDATE);
-  } else if constexpr (sizeof(T) == 8) {
-    reg = plt_b32(scalar, POST_UPDATE);
-  }
-  return reg;
-}
-
-template <typename T>
-__simd_callee__ __aicore_inline__ MaskReg SetMask(uint32_t scalar) {
-  MaskReg reg;
-  if constexpr (sizeof(T) == 1) {
-    reg = plt_b8(scalar, POST_UPDATE);
-  } else if constexpr (sizeof(T) == 2) {
-    reg = plt_b16(scalar, POST_UPDATE);
-  } else if constexpr (sizeof(T) == 4) {
-    reg = plt_b32(scalar, POST_UPDATE);
-  } else if constexpr (sizeof(T) == 8) {
-    reg = plt_b32(scalar, POST_UPDATE);
-  }
-  return reg;
-}
-template <typename T>
-__aicore_inline__ MaskReg MoveMask() {
-  if constexpr (sizeof(T) == 2) {
-    return movp_b16();
-  } else if constexpr (sizeof(T) == 4) {
-    return movp_b32();
-  } else if constexpr (sizeof(T) == 8) {
-    return movp_b32();
-  }
-}
-
-template <ROUND T>
-constexpr __aicore_inline__ auto RoundValue() {
-  return std::integral_constant<ROUND, T>();
-}
+template <RoundMode R>
+constexpr CastTrait kCastTrait{RegLayout::ZERO, SatMode::SAT, MaskMergeMode::ZEROING, R};
 
 template <typename T>
 constexpr __aicore_inline__ DistVST DistSTValue() {
@@ -226,32 +183,32 @@ __simt_vf__ inline void GatherLoadSimtPad(__ubuf__ T *dst, __gm__ T *src, __gm__
   }
 }
 
-#define DECLARE_BINARY(builtin)                                                                                 \
-  template <typename T>                                                                                         \
-  __aicore_inline__ void builtin##_count(__ubuf__ T *dst, __ubuf__ T *src0, __ubuf__ T *src1, uint32_t count) { \
-    __VEC_SCOPE__ {                                                                                             \
-      RegTensor<T> vreg0;                                                                                       \
-      RegTensor<T> vreg1;                                                                                       \
-      RegTensor<T> vreg2;                                                                                       \
-      vector_bool stPreg;                                                                                       \
-      uint32_t sregLower = BlockNum(T);                                                                         \
-      uint16_t repeat = CeilDiv(count, sregLower);                                                              \
-      constexpr auto distValue = std::integral_constant<DistVST, DistSTValue<T>()>();                           \
-      for (uint16_t i = 0; i < repeat; ++i) {                                                                   \
-        stPreg = UpdateMask<T>(count);                                                                          \
-        if constexpr (sizeof(T) == 8) {                                                                         \
-          vlds(vreg0, src0, i * sregLower);                                                                     \
-          vlds(vreg1, src1, i * sregLower);                                                                     \
-          builtin(vreg2, vreg0, vreg1, stPreg, MODE_ZEROING);                                                   \
-          vsts(vreg2, dst, i * sregLower, stPreg);                                                              \
-        } else {                                                                                                 \
-          vlds(vreg0, src0, i * sregLower, NORM);                                                               \
-          vlds(vreg1, src1, i * sregLower, NORM);                                                               \
-          builtin(vreg2, vreg0, vreg1, stPreg, MODE_ZEROING);                                                   \
-          vsts(vreg2, dst, i * sregLower, distValue, stPreg);                                                   \
-        }                                                                                                        \
-      }                                                                                                         \
-    }                                                                                                           \
+#define DECLARE_BINARY(builtin)                                                                                        \
+  template <typename T>                                                                                                \
+  __aicore_inline__ void builtin##_count(__ubuf__ T *dst, __ubuf__ T *src0, __ubuf__ T *src1, uint32_t count) {        \
+    __VEC_SCOPE__ {                                                                                                    \
+      RegTensor<T> vreg0;                                                                                              \
+      RegTensor<T> vreg1;                                                                                              \
+      RegTensor<T> vreg2;                                                                                              \
+      vector_bool stPreg;                                                                                              \
+      uint32_t sregLower = BlockNum(T);                                                                                \
+      uint16_t repeat = CeilDiv(count, sregLower);                                                                     \
+      constexpr auto distValue = std::integral_constant<DistVST, DistSTValue<T>()>();                                  \
+      for (uint16_t i = 0; i < repeat; ++i) {                                                                          \
+        stPreg = UpdateMask<T>(count);                                                                                 \
+        if constexpr (sizeof(T) == 8) {                                                                                \
+          vlds((vector_2xvl_s64 &)vreg0, src0, i * sregLower);                                                         \
+          vlds((vector_2xvl_s64 &)vreg1, src1, i * sregLower);                                                         \
+          builtin((vector_2xvl_s64 &)vreg2, (vector_2xvl_s64 &)vreg0, (vector_2xvl_s64 &)vreg1, stPreg, MODE_ZEROING); \
+          vsts((vector_2xvl_s64 &)vreg2, dst, i * sregLower, stPreg);                                                  \
+        } else {                                                                                                       \
+          vlds(vreg0, src0, i * sregLower, NORM);                                                                      \
+          vlds(vreg1, src1, i * sregLower, NORM);                                                                      \
+          builtin(vreg2, vreg0, vreg1, stPreg, MODE_ZEROING);                                                          \
+          vsts(vreg2, dst, i * sregLower, distValue, stPreg);                                                          \
+        }                                                                                                              \
+      }                                                                                                                \
+    }                                                                                                                  \
   }
 
 #define DECLARE_BINARY_MASK(builtin)                                                                          \
@@ -383,105 +340,8 @@ DECLARE_BINARYS(vmins)
 DECLARE_BINARYS_EXT(vdiv)
 DECLARE_BINARYS_EXT(vsub)
 
-#define DECLARE_CAST(T, U, ...)                                                          \
-  template <ROUND R>                                                                     \
-  __aicore_inline__ void CastImpl(RegTensor<T> &dst, RegTensor<U> &src, MaskReg &mask) { \
-    vcvt(dst, src, mask, __VA_ARGS__);                                                   \
-  }
-
-template <ROUND R>
-__aicore_inline__ void CastImpl(RegTensor<half> &dst, RegTensor<int32_t> &src, MaskReg &mask) {
-  vector_f32 vregTmpF32;
-  vcvt(vregTmpF32, src, mask, RoundValue<R>());
-  vcvt(dst, vregTmpF32, mask, RoundValue<R>(), RS_ENABLE, PART_EVEN);
-}
-
-template <ROUND R>
-__aicore_inline__ void CastImpl(RegTensor<float> &dst, RegTensor<float> &src, MaskReg &mask) {
-  vtrc(dst, src, RoundValue<R>(), mask);
-}
-
-DECLARE_CAST(float, half, PART_EVEN)
-DECLARE_CAST(float, bfloat16_t, PART_EVEN)
-DECLARE_CAST(half, uint8_t, PART_EVEN)
-DECLARE_CAST(half, int8_t, PART_EVEN)
-DECLARE_CAST(float, int16_t, PART_EVEN)
-DECLARE_CAST(int32_t, int16_t, PART_EVEN)
-
-DECLARE_CAST(int16_t, int32_t, RS_ENABLE, PART_EVEN)
-
-DECLARE_CAST(float, int32_t, RoundValue<R>())
-DECLARE_CAST(half, int16_t, RoundValue<R>())
-DECLARE_CAST(int32_t, float, RoundValue<R>(), RS_ENABLE)
-DECLARE_CAST(int16_t, half, RoundValue<R>(), RS_ENABLE)
-
-DECLARE_CAST(int32_t, half, RoundValue<R>(), PART_EVEN)
-
-DECLARE_CAST(int16_t, float, RoundValue<R>(), RS_ENABLE, PART_EVEN)
-DECLARE_CAST(uint8_t, half, RoundValue<R>(), RS_ENABLE, PART_EVEN)
-DECLARE_CAST(int8_t, half, RoundValue<R>(), RS_ENABLE, PART_EVEN)
-DECLARE_CAST(int32_t, bfloat16_t, RoundValue<R>(), RS_ENABLE, PART_EVEN)
-DECLARE_CAST(half, float, RoundValue<R>(), RS_ENABLE, PART_EVEN)
-DECLARE_CAST(bfloat16_t, float, RoundValue<R>(), RS_ENABLE, PART_EVEN)
-
-template <ROUND R>
-__aicore_inline__ void CastImpl(RegTensor<int64_t> &dst, RegTensor<int32_t> &src, MaskReg &mask) {
-  RegTensor<int32_t> tmp0;
-  RegTensor<int32_t> tmp1;
-  RegTensor<int32_t> zero;
-  MaskReg lowMask;
-  MaskReg highMask;
-  vbr(zero, (int32_t)0);
-  pintlv_b32(lowMask, highMask, mask, mask);
-  vintlv(tmp0, tmp1, src, zero);
-  vcvt((vector_s64 &)tmp0, tmp0, lowMask, PART_EVEN, MODE_ZEROING);
-  vcvt((vector_s64 &)tmp1, tmp1, highMask, PART_EVEN, MODE_ZEROING);
-  vdintlv((RegTensor<int32_t> &)dst.val[0], (RegTensor<int32_t> &)dst.val[1], tmp0, tmp1);
-}
-
-template <ROUND R>
-__aicore_inline__ void CastImpl(RegTensor<int32_t> &dst, RegTensor<int64_t> &src, MaskReg &mask) {
-  RegTensor<int32_t> tmp0;
-  RegTensor<int32_t> tmp1;
-  MaskReg lowMask;
-  MaskReg highMask;
-  pintlv_b32(lowMask, highMask, mask, mask);
-  vintlv(tmp0, tmp1, (RegTensor<int32_t> &)src.val[0], (RegTensor<int32_t> &)src.val[1]);
-  vcvt(tmp0, (vector_s64 &)tmp0, lowMask, RS_ENABLE, PART_EVEN, MODE_ZEROING);
-  vcvt(tmp1, (vector_s64 &)tmp1, highMask, RS_ENABLE, PART_EVEN, MODE_ZEROING);
-  vdintlv(dst, tmp0, tmp0, tmp1);
-}
-
-template <ROUND R>
-__aicore_inline__ void CastImpl(RegTensor<int64_t> &dst, RegTensor<float> &src, MaskReg &mask) {
-  RegTensor<float> tmp0;
-  RegTensor<float> tmp1;
-  RegTensor<int32_t> zero;
-  MaskReg lowMask;
-  MaskReg highMask;
-  vbr(zero, (int32_t)0);
-  pintlv_b32(lowMask, highMask, mask, mask);
-  vintlv(tmp0, tmp1, src, (RegTensor<float> &)zero);
-  vcvt((vector_s64 &)tmp0, tmp0, lowMask, RoundValue<R>(), RS_ENABLE, PART_EVEN, MODE_ZEROING);
-  vcvt((vector_s64 &)tmp1, tmp1, highMask, RoundValue<R>(), RS_ENABLE, PART_EVEN, MODE_ZEROING);
-  vdintlv((RegTensor<float> &)dst.val[0], (RegTensor<float> &)dst.val[1], tmp0, tmp1);
-}
-
-template <ROUND R>
-__aicore_inline__ void CastImpl(RegTensor<float> &dst, RegTensor<int64_t> &src, MaskReg &mask) {
-  RegTensor<float> tmp0;
-  RegTensor<float> tmp1;
-  MaskReg lowMask;
-  MaskReg highMask;
-  pintlv_b32(lowMask, highMask, mask, mask);
-  vintlv(tmp0, tmp1, (RegTensor<float> &)src.val[0], (RegTensor<float> &)src.val[1]);
-  vcvt(tmp0, (vector_s64 &)tmp0, lowMask, RoundValue<R>(), PART_EVEN, MODE_ZEROING);
-  vcvt(tmp1, (vector_s64 &)tmp1, highMask, RoundValue<R>(), PART_EVEN, MODE_ZEROING);
-  vdintlv(dst, tmp0, tmp0, tmp1);
-}
-
-template <typename DST_TYPE, typename SRC_TYPE, ROUND R = ROUND::A>
-__aicore_inline__ void cast_count(__ubuf__ DST_TYPE *dst, __ubuf__ SRC_TYPE *src0, uint32_t count) {
+template <typename DST_TYPE, typename SRC_TYPE, RoundMode R = RoundMode::CAST_ROUND>
+__aicore_inline__ void CastCount(__ubuf__ DST_TYPE *dst, __ubuf__ SRC_TYPE *src0, uint32_t count) {
   __VEC_SCOPE__ {
     RegTensor<SRC_TYPE> vreg0;
     RegTensor<DST_TYPE> vreg1;
@@ -497,7 +357,7 @@ __aicore_inline__ void cast_count(__ubuf__ DST_TYPE *dst, __ubuf__ SRC_TYPE *src
       }
 
       if constexpr (sizeof(SRC_TYPE) == 8) {
-        vlds(vreg0, src0, i * sregLower);
+        vlds((vector_2xvl_s64 &)vreg0, src0, i * sregLower);
       } else if constexpr (sizeof(SRC_TYPE) == 1 && sizeof(DST_TYPE) == 2) {
         vlds(vreg0, src0, i * sregLower, UNPK_B8);
       } else if constexpr (sizeof(SRC_TYPE) == 2 && sizeof(DST_TYPE) == 4) {
@@ -508,10 +368,18 @@ __aicore_inline__ void cast_count(__ubuf__ DST_TYPE *dst, __ubuf__ SRC_TYPE *src
         vlds(vreg0, src0, i * sregLower, NORM);
       }
 
-      CastImpl<R>(vreg1, vreg0, exPreg);
+      if constexpr (std::is_same<DST_TYPE, SRC_TYPE>::value) {
+        Truncate<DST_TYPE, R>(vreg1, vreg0, exPreg);
+      } else if constexpr (std::is_same<DST_TYPE, half>::value && std::is_same<SRC_TYPE, int32_t>::value) {
+        RegTensor<float> tmp;
+        Cast<float, int32_t, kCastTrait<R>>(tmp, vreg0, exPreg);
+        Cast<half, float, kCastTrait<R>>(vreg1, tmp, exPreg);
+      } else {
+        Cast<DST_TYPE, SRC_TYPE, kCastTrait<R>>(vreg1, vreg0, exPreg);
+      }
 
       if constexpr (sizeof(DST_TYPE) == 8) {
-        vsts(vreg1, dst, i * sregLower, exPreg);
+        vsts((vector_2xvl_s64 &)vreg1, dst, i * sregLower, exPreg);
       } else if constexpr (sizeof(DST_TYPE) == 1 && sizeof(SRC_TYPE) == 2) {
         vsts(vreg1, dst, i * sregLower, PK_B16, exPreg);
       } else if constexpr (sizeof(DST_TYPE) == 2 && sizeof(SRC_TYPE) == 4) {
@@ -547,11 +415,15 @@ __aicore_inline__ void VectorDupCount(__ubuf__ T *dst, T scalar, uint32_t count)
     uint32_t sregLower = BlockNum(T);
     uint16_t repeat = CeilDiv(count, sregLower);
     constexpr auto distValue = std::integral_constant<DistVST, DistSTValue<T>()>();
-    vbr(vreg0, scalar);
+    if constexpr (sizeof(T) == 8) {
+      vbr((vector_2xvl_s64 &)vreg0, scalar);
+    } else {
+      vbr(vreg0, scalar);
+    }
     for (uint16_t i = 0; i < repeat; ++i) {
       stPreg = UpdateMask<T>(count);
       if constexpr (sizeof(T) == 8) {
-        vsts(vreg0, dst, i * sregLower, stPreg);
+        vsts((vector_2xvl_s64 &)vreg0, dst, i * sregLower, stPreg);
       } else {
         vsts(vreg0, dst, i * sregLower, distValue, stPreg);
       }
@@ -578,13 +450,13 @@ __aicore_inline__ void VectorDupCount(__ubuf__ T *dst, T scalar, uint32_t count)
     builtin##_count(xd, xn, xm, op.count);          \
   } while (0)
 
-template <typename DST_TYPE, typename SRC_TYPE, ROUND R = ROUND::A>
+template <typename DST_TYPE, typename SRC_TYPE, RoundMode R = RoundMode::CAST_ROUND>
 __aicore_inline__ void Cast(bcodeptr_t pc, uint64_t head, uint64_t tile) {
   vUnary op;
   vUnary::Decode(pc, head, op);
   __ubuf__ DST_TYPE *xd = (__ubuf__ DST_TYPE *)(op.xd);
   __ubuf__ SRC_TYPE *xn = (__ubuf__ SRC_TYPE *)(op.xn);
-  cast_count<DST_TYPE, SRC_TYPE, R>(xd, xn, op.count);
+  CastCount<DST_TYPE, SRC_TYPE, R>(xd, xn, op.count);
 }
 
 __aicore_inline__ void LogicalNotBool(bcodeptr_t pc, uint64_t head, uint64_t tile) {
@@ -618,37 +490,44 @@ __aicore_inline__ void LogicalNotBool(bcodeptr_t pc, uint64_t head, uint64_t til
 
 template <typename T>
 __aicore_inline__ void BinCompare(bcodeptr_t pc, uint64_t head, uint64_t tile) {
-#define CMP_DISPATCH(op_type, builtin)                                                  \
-  case op_type:                                                                         \
-    do {                                                                                \
-      __VEC_SCOPE__ {                                                                   \
-        RegTensor<T> vreg0;                                                             \
-        RegTensor<T> vreg1;                                                             \
-        RegTensor<T> vreg2;                                                             \
-        RegTensor<T>  scalar0;                                                             \
-        RegTensor<T>  scalar1;                                                             \
-        vector_bool stPreg;                                                             \
-        uint32_t count = static_cast<uint32_t>(op.count);                               \
-        uint32_t sregLower = BlockNum(T);                                               \
-        uint16_t repeat = CeilDiv(count, sregLower);                                    \
-        constexpr auto distValue = std::integral_constant<DistVST, DistSTValue<T>()>(); \
-        vbr(scalar0, (T)0);                                                             \
-        vbr(scalar1, (T)1);                                                             \
-        for (uint16_t i = 0; i < repeat; ++i) {                                         \
-          stPreg = UpdateMask<T>(count);                                                \
-          vector_bool cmp_mask;                                                         \
-          vlds(vreg0, xn, i * sregLower, NORM);                                         \
-          vlds(vreg1, xm, i * sregLower, NORM);                                         \
-          builtin(cmp_mask, vreg0, vreg1, stPreg);                                      \
-          vsel(vreg2, scalar1, scalar0, cmp_mask);                                      \
-          vsts(vreg2, xd, i * sregLower, distValue, stPreg);                            \
-        }                                                                               \
-      }                                                                                 \
-    } while (0);                                                                        \
+  using ResultT = typename std::conditional<sizeof(T) == 8, int32_t, T>::type;
+#define CMP_DISPATCH(op_type, builtin)                                                        \
+  case op_type:                                                                               \
+    do {                                                                                      \
+      __VEC_SCOPE__ {                                                                         \
+        RegTensor<T> vreg0;                                                                   \
+        RegTensor<T> vreg1;                                                                   \
+        RegTensor<ResultT> vreg2;                                                             \
+        RegTensor<ResultT> scalar0;                                                           \
+        RegTensor<ResultT> scalar1;                                                           \
+        vector_bool stPreg;                                                                   \
+        uint32_t count = static_cast<uint32_t>(op.count);                                     \
+        uint32_t sregLower = BlockNum(T);                                                     \
+        uint16_t repeat = CeilDiv(count, sregLower);                                          \
+        constexpr auto distValue = std::integral_constant<DistVST, DistSTValue<ResultT>()>(); \
+        vbr(scalar0, (ResultT)0);                                                             \
+        vbr(scalar1, (ResultT)1);                                                             \
+        for (uint16_t i = 0; i < repeat; ++i) {                                               \
+          stPreg = UpdateMask<T>(count);                                                      \
+          vector_bool cmp_mask;                                                               \
+          if constexpr (sizeof(T) == 8) {                                                     \
+            vlds((vector_2xvl_s64 &)vreg0, xn, i * sregLower);                                \
+            vlds((vector_2xvl_s64 &)vreg1, xm, i * sregLower);                                \
+            builtin(cmp_mask, (vector_2xvl_s64 &)vreg0, (vector_2xvl_s64 &)vreg1, stPreg);    \
+          } else {                                                                            \
+            vlds(vreg0, xn, i * sregLower, NORM);                                             \
+            vlds(vreg1, xm, i * sregLower, NORM);                                             \
+            builtin(cmp_mask, vreg0, vreg1, stPreg);                                          \
+          }                                                                                   \
+          vsel(vreg2, scalar1, scalar0, cmp_mask);                                            \
+          vsts(vreg2, xd, i * sregLower, distValue, stPreg);                                  \
+        }                                                                                     \
+      }                                                                                       \
+    } while (0);                                                                              \
     break
   vCompare op;
   vCompare::Decode(pc, head, op);
-  __ubuf__ T *xd = (__ubuf__ T *)(op.xd);
+  __ubuf__ ResultT *xd = (__ubuf__ ResultT *)(op.xd);
   __ubuf__ T *xm = (__ubuf__ T *)(op.xm);
   __ubuf__ T *xn = (__ubuf__ T *)(op.xn);
   switch (op.type) {
@@ -658,51 +537,6 @@ __aicore_inline__ void BinCompare(bcodeptr_t pc, uint64_t head, uint64_t tile) {
     CMP_DISPATCH(V_CMP_GE, vcmp_ge);
     CMP_DISPATCH(V_CMP_LT, vcmp_lt);
     CMP_DISPATCH(V_CMP_LE, vcmp_le);
-    default:
-      break;
-  }
-}
-
-__aicore_inline__ void BinCompareB64(bcodeptr_t pc, uint64_t head, uint64_t tile) {
-#define CMP_B64_DISPATCH(op_type, builtin)                        \
-  case op_type:                                                   \
-    do {                                                          \
-      __VEC_SCOPE__ {                                             \
-        RegTensor<int64_t> vreg0;                                 \
-        RegTensor<int64_t> vreg1;                                 \
-        RegTensor<int32_t> vreg2;                                 \
-        RegTensor<int32_t> scalar0;                               \
-        RegTensor<int32_t> scalar1;                               \
-        vector_bool stPreg;                                       \
-        uint32_t count = static_cast<uint32_t>(op.count);         \
-        uint32_t sregLower = BlockNum(int64_t);                   \
-        uint16_t repeat = CeilDiv(count, sregLower);              \
-        vbr(scalar0, (int32_t)0);                                 \
-        vbr(scalar1, (int32_t)1);                                 \
-        for (uint16_t i = 0; i < repeat; ++i) {                   \
-          stPreg = UpdateMask<int64_t>(count);                    \
-          vector_bool cmp_mask;                                   \
-          vlds(vreg0, xn, i * sregLower);                         \
-          vlds(vreg1, xm, i * sregLower);                         \
-          builtin(cmp_mask, vreg0, vreg1, stPreg);                \
-          vsel(vreg2, scalar1, scalar0, cmp_mask);                \
-          vsts(vreg2, xd, i * sregLower, NORM_B32, stPreg);       \
-        }                                                         \
-      }                                                           \
-    } while (0);                                                  \
-    break
-  vCompare op;
-  vCompare::Decode(pc, head, op);
-  __ubuf__ int32_t *xd = (__ubuf__ int32_t *)(op.xd);
-  __ubuf__ int64_t *xm = (__ubuf__ int64_t *)(op.xm);
-  __ubuf__ int64_t *xn = (__ubuf__ int64_t *)(op.xn);
-  switch (op.type) {
-    CMP_B64_DISPATCH(V_CMP_EQ, vcmp_eq);
-    CMP_B64_DISPATCH(V_CMP_NE, vcmp_ne);
-    CMP_B64_DISPATCH(V_CMP_GT, vcmp_gt);
-    CMP_B64_DISPATCH(V_CMP_GE, vcmp_ge);
-    CMP_B64_DISPATCH(V_CMP_LT, vcmp_lt);
-    CMP_B64_DISPATCH(V_CMP_LE, vcmp_le);
     default:
       break;
   }
@@ -910,7 +744,7 @@ __aicore_inline__ void Power(bcodeptr_t pc, uint64_t head, uint64_t tile) {
 
       // Constructing the odd-even case
       vmuls(vreg4, vreg1, (float)0.5, stPreg, MODE_ZEROING);
-      CastImpl<ROUND::F>(vreg4, vreg4, stPreg);
+      Truncate<float, RoundMode::CAST_FLOOR>(vreg4, vreg4, stPreg);
       vmuls(vreg4, vreg4, (float)2.0, stPreg, MODE_ZEROING);
       vsub(vreg4, vreg1, vreg4, stPreg, MODE_ZEROING);
       vcmps_eq(cmp_mask, vreg4, (float)0, stPreg);
@@ -918,7 +752,7 @@ __aicore_inline__ void Power(bcodeptr_t pc, uint64_t head, uint64_t tile) {
       vsel(vreg4, vreg2, vreg3, cmp_mask);
 
       // Check negative^{decimal}
-      CastImpl<ROUND::Z>(vreg3, vreg1, stPreg);
+      Truncate<float, RoundMode::CAST_TRUNC>(vreg3, vreg1, stPreg);
       vcmp_eq(cmp_mask, vreg3, vreg1, stPreg);
       vsel(vreg4, vreg4, scalar_nan, cmp_mask);
 
@@ -932,19 +766,16 @@ __aicore_inline__ void Power(bcodeptr_t pc, uint64_t head, uint64_t tile) {
 
 template <typename T>
 __aicore_inline__ void BroadcastS(bcodeptr_t pc, uint64_t head, uint64_t tile) {
-  vBroadcastS op;
-  vBroadcastS::Decode(pc, head, op);
+  using Op = typename std::conditional<sizeof(T) == 8, vBroadcastS_B64, vBroadcastS>::type;
+  Op op;
+  Op::Decode(pc, head, op);
   __ubuf__ T *xd = (__ubuf__ T *)(op.xd);
-  T val = op.scalar;
-  VectorDupCount(xd, val, op.count);
-}
-
-__aicore_inline__ void BroadcastS_B64(bcodeptr_t pc, uint64_t head, uint64_t tile) {
-  vBroadcastS_B64 op;
-  vBroadcastS_B64::Decode(pc, head, op);
-  __ubuf__ int64_t *xd = (__ubuf__ int64_t *)(op.xd);
-  uint64_t raw_value = (op.high << 32) | op.scalar;
-  int64_t val = static_cast<int64_t>(raw_value);
+  T val;
+  if constexpr (sizeof(T) == 8) {
+    val = static_cast<T>((op.high << 32) | op.scalar);
+  } else {
+    val = op.scalar;
+  }
   VectorDupCount(xd, val, op.count);
 }
 
@@ -978,12 +809,16 @@ __aicore_inline__ void BroadcastX(bcodeptr_t pc, uint64_t head, uint64_t tile) {
     RegTensor<T> vreg0;
     uint32_t sregLower = BlockNum(T);
     uint32_t max_block = min(sregLower, static_cast<uint32_t>(op.count));
-    vector_bool stPreg = SetMask<T>(max_block);
+    vector_bool stPreg = UpdateMask<T>(max_block);
     constexpr auto distValue = std::integral_constant<DistVST, DistSTValue<T>()>();
     for (uint16_t k = 0; k < (uint16_t)op.iter_num; k++) {
       for (uint16_t i = 0; i < (uint16_t)op.lead_num; i++) {
         uint32_t xn_offset = k * (op.lead_num + op.lead_pad) + i;
-        if constexpr (sizeof(T) == 4) {
+        if constexpr (sizeof(T) == 8) {
+          __ubuf__ int32_t *xn_b32 = (__ubuf__ int32_t *)(xn);
+          vlds((RegTensor<int32_t> &)vreg0.reg[0], xn_b32, xn_offset * 2, BRC_B32);
+          vlds((RegTensor<int32_t> &)vreg0.reg[1], xn_b32, xn_offset * 2 + 1, BRC_B32);
+        } else if constexpr (sizeof(T) == 4) {
           vlds(vreg0, xn, xn_offset, BRC_B32);
         } else if constexpr (sizeof(T) == 2) {
           vlds(vreg0, xn, xn_offset, BRC_B16);
@@ -991,40 +826,17 @@ __aicore_inline__ void BroadcastX(bcodeptr_t pc, uint64_t head, uint64_t tile) {
           vlds(vreg0, xn, xn_offset, BRC_B8);
         }
         uint32_t xd_offset = k * op.count * op.lead_num + i * op.count;
-        vsts(vreg0, xd, xd_offset, distValue, stPreg);
+        if constexpr (sizeof(T) == 8) {
+          vsts((vector_2xvl_s64 &)vreg0, xd, xd_offset, stPreg);
+        } else {
+          vsts(vreg0, xd, xd_offset, distValue, stPreg);
+        }
       }
     }
   }
 
   if (op.count > BlockNum(T)) {
-    ExpandBroadcastX<T>(xd, op);
-  }
-}
-
-__aicore_inline__ void BroadcastXB64(bcodeptr_t pc, uint64_t head, uint64_t tile) {
-  vBroadcastX op;
-  vBroadcastX::Decode(pc, head, op);
-  __ubuf__ int64_t *xd = (__ubuf__ int64_t *)(op.xd);
-  __ubuf__ int64_t *xn = (__ubuf__ int64_t *)(op.xn);
-  __ubuf__ int32_t *xn_b32 = (__ubuf__ int32_t *)(xn);
-  __VEC_SCOPE__ {
-    RegTensor<int64_t> vreg0;
-    uint32_t sregLower = BlockNum(int64_t);
-    uint32_t max_block = min(sregLower, static_cast<uint32_t>(op.count));
-    vector_bool stPreg = SetMask<int64_t>(max_block);
-    for (uint16_t k = 0; k < (uint16_t)op.iter_num; k++) {
-      for (uint16_t i = 0; i < (uint16_t)op.lead_num; i++) {
-        uint32_t xn_offset = k * (op.lead_num + op.lead_pad) + i;
-        vlds(vreg0.val[0], xn_b32, xn_offset * 2, BRC_B32);
-        vlds(vreg0.val[1], xn_b32, xn_offset * 2 + 1, BRC_B32);
-        uint32_t xd_offset = k * op.count * op.lead_num + i * op.count;
-        vsts(vreg0, xd, xd_offset, stPreg);
-      }
-    }
-  }
-
-  if (op.count > BlockNum(int64_t)) {
-    ExpandBroadcastX<int64_t>(xd, op);
+    ExpandBroadcastX(xd, op);
   }
 }
 
@@ -1102,8 +914,10 @@ __aicore_inline__ void ReduceXLoop(__ubuf__ T *xd, __ubuf__ T *xn, const vReduce
   const uint16_t iter_count = op.dup_size / op.dup_block;
   __VEC_SCOPE__ {
     RegTensor<T> accum, value;
-    vector_bool mask = SetMask<T>(min((uint32_t)op.red_size, vector_lanes));
-    vector_bool tail_mask = SetMask<T>(tail_lanes);
+    uint32_t mask_count = min((uint32_t)op.red_size, vector_lanes);
+    vector_bool mask = UpdateMask<T>(mask_count);
+    uint32_t tail_remaining = tail_lanes;
+    vector_bool tail_mask = UpdateMask<T>(tail_remaining);
     constexpr auto distValue = std::integral_constant<DistVST, sizeof(T) == 2 ? DistVST::DIST_ONEPT_B16
                                                                           : DistVST::DIST_ONEPT_B32>();
     for (uint16_t k = 0; k < iter_count; ++k) {
@@ -1162,7 +976,7 @@ __aicore_inline__ void ReduceXGroup(__ubuf__ T *xd, __ubuf__ T *xn, const vReduc
   const uint32_t src_stride = row_size * op.dup_block;
   __VEC_SCOPE__ {
     RegTensor<T> accum, value;
-    vector_bool mask = SetMask<T>(vector_lanes);
+    vector_bool mask = CreateMask<T>();
     vector_align align;
     for (uint16_t k = 0; k < iter_count; ++k) {
       __ubuf__ T *dst = xd + k * dst_stride;
@@ -1245,7 +1059,8 @@ __simd_callee__ __aicore_inline__ void FoldPackedRows(RegTensor<T> &accum, RegTe
     vci(index, (IndexT)SHIFT, INC_ORDER);
     // Merge the upper half of the row slots into the lower half, keeping columns aligned.
     vselr((RegTensor<UintFor<T>> &)value, (RegTensor<UintFor<T>> &)accum, (RegTensor<UintFor<T>> &)index);
-    vector_bool mask = SetMask<T>(SHIFT);
+    uint32_t mask_count = SHIFT;
+    vector_bool mask = UpdateMask<T>(mask_count);
     BisectReduce<RED_TYPE>(accum, accum, value, mask);
     FoldPackedRows<SHIFT / 2, ROW_SIZE, RED_TYPE, T>(accum, value);
   }
@@ -1292,9 +1107,11 @@ __aicore_inline__ void ReduceYPack(__ubuf__ T *xd, __ubuf__ T *xn, uint16_t red_
   const uint16_t tail_count = load_count & 3;
   __VEC_SCOPE__ {
     RegTensor<T> accum, value;
-    vector_bool reduce_mask = SetMask<T>(vector_lanes);
-    vector_bool tail_mask = SetMask<T>(tail_lanes);
-    vector_bool store_mask = SetMask<T>(ROW_SIZE);
+    vector_bool reduce_mask = CreateMask<T>();
+    uint32_t tail_remaining = tail_lanes;
+    vector_bool tail_mask = UpdateMask<T>(tail_remaining);
+    uint32_t store_count = ROW_SIZE;
+    vector_bool store_mask = UpdateMask<T>(store_count);
     for (uint16_t i = 0; i < dup_count; ++i) {
       uint32_t offset = i * group_stride;
       if constexpr (LOAD == ReduceLoad::Loop) {
@@ -1511,16 +1328,17 @@ __aicore_inline__ void ReduceJoin(bcodeptr_t pc, uint64_t head, uint64_t tile) {
 
 template <typename T>
 __aicore_inline__ void Select(bcodeptr_t pc, uint64_t head, uint64_t tile) {
+  using CondT = typename std::conditional<sizeof(T) == 8, int32_t, T>::type;
   vSelect op;
   vSelect::Decode(pc, head, op);
   __ubuf__ T *xm = (__ubuf__ T *)(op.xm);
-  __ubuf__ T *cond = (__ubuf__ T *)(op.cond);
+  __ubuf__ CondT *cond = (__ubuf__ CondT *)(op.cond);
   __ubuf__ T *xd = (__ubuf__ T *)(op.xd);
   __ubuf__ T *xn = (__ubuf__ T *)(op.xn);
   __VEC_SCOPE__ {
     RegTensor<T> vreg0;
     RegTensor<T> vreg1;
-    RegTensor<T> vreg2;
+    RegTensor<CondT> vreg2;
     RegTensor<T> vreg3;
     vector_bool stPreg;
     uint32_t count = static_cast<uint32_t>(op.count);
@@ -1530,41 +1348,22 @@ __aicore_inline__ void Select(bcodeptr_t pc, uint64_t head, uint64_t tile) {
     for (uint16_t i = 0; i < repeat; ++i) {
       stPreg = UpdateMask<T>(count);
       vector_bool cmp_mask;
-      vlds(vreg0, xn, i * sregLower, NORM);
-      vlds(vreg1, xm, i * sregLower, NORM);
+      if constexpr (sizeof(T) == 8) {
+        vlds((vector_2xvl_s64 &)vreg0, xn, i * sregLower);
+        vlds((vector_2xvl_s64 &)vreg1, xm, i * sregLower);
+      } else {
+        vlds(vreg0, xn, i * sregLower, NORM);
+        vlds(vreg1, xm, i * sregLower, NORM);
+      }
       vlds(vreg2, cond, i * sregLower, NORM);
-      vcmps_ne(cmp_mask, vreg2, T(0), stPreg);
-      vsel(vreg3, vreg0, vreg1, cmp_mask);
-      vsts(vreg3, xd, i * sregLower, distValue, stPreg);
-    }
-  }
-}
-
-__aicore_inline__ void SelectB64(bcodeptr_t pc, uint64_t head, uint64_t tile) {
-  vSelect op;
-  vSelect::Decode(pc, head, op);
-  __ubuf__ int64_t *xm = (__ubuf__ int64_t *)(op.xm);
-  __ubuf__ int32_t *cond = (__ubuf__ int32_t *)(op.cond);
-  __ubuf__ int64_t *xd = (__ubuf__ int64_t *)(op.xd);
-  __ubuf__ int64_t *xn = (__ubuf__ int64_t *)(op.xn);
-  __VEC_SCOPE__ {
-    RegTensor<int64_t> vreg0;
-    RegTensor<int64_t> vreg1;
-    RegTensor<int64_t> vreg3;
-    RegTensor<int32_t> vreg2;
-    vector_bool stPreg;
-    uint32_t count = static_cast<uint32_t>(op.count);
-    uint32_t sregLower = BlockNum(int64_t);
-    uint16_t repeat = CeilDiv(count, sregLower);
-    for (uint16_t i = 0; i < repeat; ++i) {
-      stPreg = UpdateMask<int64_t>(count);
-      vector_bool cmp_mask;
-      vlds(vreg0, xn, i * sregLower);
-      vlds(vreg1, xm, i * sregLower);
-      vlds(vreg2, cond, i * sregLower, NORM);
-      vcmps_ne(cmp_mask, vreg2, (int32_t)0, stPreg);
-      vsel(vreg3, vreg0, vreg1, cmp_mask);
-      vsts(vreg3, xd, i * sregLower, stPreg);
+      vcmps_ne(cmp_mask, vreg2, CondT(0), stPreg);
+      if constexpr (sizeof(T) == 8) {
+        vsel((vector_2xvl_s64 &)vreg3, (vector_2xvl_s64 &)vreg0, (vector_2xvl_s64 &)vreg1, cmp_mask);
+        vsts((vector_2xvl_s64 &)vreg3, xd, i * sregLower, stPreg);
+      } else {
+        vsel(vreg3, vreg0, vreg1, cmp_mask);
+        vsts(vreg3, xd, i * sregLower, distValue, stPreg);
+      }
     }
   }
 }
@@ -1633,7 +1432,7 @@ __aicore_inline__ void OneHot(bcodeptr_t pc, uint64_t head, uint64_t tile) {
   __ubuf__ T *xd = (__ubuf__ T *)(op.xd);
   T on_value, off_value;
   vOneHot::DecodeValue(pc, on_value, off_value);
-  VectorDupCount(xd, off_value, op.data_size);
+  VectorDupCount<T>(xd, off_value, op.data_size);
   switch (op.mode) {
     case vOneHot::MODE_X: {
       VfCall<OneHotSimtX<T>>(cce::dim3(kSimtThreadNum), xd, indices, static_cast<uint32_t>(op.iter_num),
@@ -2606,10 +2405,10 @@ DEF_DISP_SIMD(V_SQRT, UNARY(pc, vsqrt, head, tile, float))
 DEF_DISP_SIMD(V_ABS, UNARY(pc, vabs, head, tile, float))
 DEF_DISP_SIMD(V_LOG, UNARY(pc, vln, head, tile, float))
 DEF_DISP_SIMD(V_EXP, UNARY(pc, vexp, head, tile, float))
-DEF_DISP_SIMD(V_ROUND, (Cast<float, float, ROUND::R>(pc, head, tile)))
-DEF_DISP_SIMD(V_FLOOR, (Cast<float, float, ROUND::F>(pc, head, tile)))
-DEF_DISP_SIMD(V_CEIL, (Cast<float, float, ROUND::C>(pc, head, tile)))
-DEF_DISP_SIMD(V_TRUNC, (Cast<float, float, ROUND::Z>(pc, head, tile)))
+DEF_DISP_SIMD(V_ROUND, (Cast<float, float, RoundMode::CAST_RINT>(pc, head, tile)))
+DEF_DISP_SIMD(V_FLOOR, (Cast<float, float, RoundMode::CAST_FLOOR>(pc, head, tile)))
+DEF_DISP_SIMD(V_CEIL, (Cast<float, float, RoundMode::CAST_CEIL>(pc, head, tile)))
+DEF_DISP_SIMD(V_TRUNC, (Cast<float, float, RoundMode::CAST_TRUNC>(pc, head, tile)))
 
 DEF_DISP_SIMD(V_ADDS, BINARYS(pc, vadds, head, float))
 DEF_DISP_SIMD(V_MULS, BINARYS(pc, vmuls, head, float))
@@ -2660,7 +2459,7 @@ DEF_DISP_SIMD(V_MAX_FP16, BINARY(pc, vmax, head, tile, half))
 
 DEF_DISP_SIMD(V_CAST_FP16_TO_BOOL, (Cast<int8_t, half>(pc, head, tile)))
 DEF_DISP_SIMD(V_CAST_FP16_TO_FP32, (Cast<float, half>(pc, head, tile)))
-DEF_DISP_SIMD(V_CAST_FP16_TO_INT32, (Cast<int32_t, half, ROUND::Z>(pc, head, tile)))
+DEF_DISP_SIMD(V_CAST_FP16_TO_INT32, (Cast<int32_t, half, RoundMode::CAST_TRUNC>(pc, head, tile)))
 DEF_DISP_SIMD(V_CMP_FP16, BinCompare<half>(pc, head, tile))
 DEF_DISP_SIMD(V_CMPS_FP16, BinCompareS<half>(pc, head, tile))
 DEF_DISP_SIMD(V_SEL_FP16, Select<half>(pc, head, tile))
@@ -2674,7 +2473,7 @@ DEF_DISP_SIMD(V_MUL_INT32, BINARY(pc, vmul, head, tile, int32_t))
 DEF_DISP_SIMD(V_MIN_INT32, BINARY(pc, vmin, head, tile, int32_t))
 DEF_DISP_SIMD(V_MAX_INT32, BINARY(pc, vmax, head, tile, int32_t))
 DEF_DISP_SIMD(V_SEL_INT32, Select<int32_t>(pc, head, tile))
-DEF_DISP_SIMD(V_SEL_INT64, SelectB64(pc, head, tile))
+DEF_DISP_SIMD(V_SEL_INT64, Select<int64_t>(pc, head, tile))
 DEF_DISP_SIMD(V_CAST_INT32_TO_FP16, (Cast<half, int32_t>(pc, head, tile)))
 DEF_DISP_SIMD(V_CAST_INT32_TO_FP32, (Cast<float, int32_t>(pc, head, tile)))
 DEF_DISP_SIMD(V_CAST_INT64_TO_INT32, (Cast<int32_t, int64_t>(pc, head, tile)))
@@ -2694,8 +2493,8 @@ DEF_DISP_SIMD(V_ATOMICCUM, AtomicCum<float>(pc, head, tile))
 DEF_DISP_SIMD(V_ATOMICCUM_FP16, AtomicCum<half>(pc, head, tile))
 
 DEF_DISP_SIMD(V_CAST_BF16_TO_FP32, (Cast<float, bfloat16_t>(pc, head, tile)))
-DEF_DISP_SIMD(V_CAST_BF16_TO_INT32, (Cast<int32_t, bfloat16_t, ROUND::A>(pc, head, tile)))
-DEF_DISP_SIMD(V_CAST_FP32_TO_BF16, (Cast<bfloat16_t, float, ROUND::R>(pc, head, tile)))
+DEF_DISP_SIMD(V_CAST_BF16_TO_INT32, (Cast<int32_t, bfloat16_t, RoundMode::CAST_ROUND>(pc, head, tile)))
+DEF_DISP_SIMD(V_CAST_FP32_TO_BF16, (Cast<bfloat16_t, float, RoundMode::CAST_RINT>(pc, head, tile)))
 
 DEF_DISP_SIMD(V_SDIV, BINARYS_EXT(pc, vdiv, head, float, false))
 DEF_DISP_SIMD(V_SDIV_FP16, BINARYS_EXT(pc, vdiv, head, half, false))
@@ -2705,7 +2504,7 @@ DEF_DISP_SIMD(V_DIVS_FP16, BINARYS_EXT(pc, vdiv, head, half, true))
 DEF_DISP_SIMD(V_ABS_INT32, UNARY(pc, vabs, head, tile, int32_t))
 DEF_DISP_SIMD(V_CMPS_INT32, BinCompareS<int32_t>(pc, head, tile))
 DEF_DISP_SIMD(V_CMP_INT32, BinCompare<int32_t>(pc, head, tile))
-DEF_DISP_SIMD(V_CMP_INT64, BinCompareB64(pc, head, tile))
+DEF_DISP_SIMD(V_CMP_INT64, BinCompare<int64_t>(pc, head, tile))
 DEF_DISP_SIMD(V_ADDS_BF16, BINARYS(pc, vadds, head, bfloat16_t))
 DEF_DISP_SIMD(V_MULS_BF16, BINARYS(pc, vmuls, head, bfloat16_t))
 DEF_DISP_SIMD(V_MAXS_BF16, BINARYS(pc, vmaxs, head, bfloat16_t))
@@ -2738,11 +2537,11 @@ DEF_DISP_SIMD(V_ONE_HOT_B16, OneHot<uint16_t>(pc, head, tile))
 DEF_DISP_SIMD(V_ADD_INT64, BINARY(pc, vadd, head, tile, int64_t))
 DEF_DISP_SIMD(V_SUB_INT64, BINARY(pc, vsub, head, tile, int64_t))
 DEF_DISP_SIMD(V_ELEMENT_ANY, ElementAny<float>(pc, head, tile))
-DEF_DISP_SIMD(V_BROADCAST_X_B64, BroadcastXB64(pc, head, tile))
-DEF_DISP_SIMD(V_BROADCAST_S_B64, BroadcastS_B64(pc, head, tile))
+DEF_DISP_SIMD(V_BROADCAST_X_B64, BroadcastX<int64_t>(pc, head, tile))
+DEF_DISP_SIMD(V_BROADCAST_S_B64, BroadcastS<int64_t>(pc, head, tile))
 DEF_DISP_SIMD(V_CAST_INT32_TO_INT64, (Cast<int64_t, int32_t>(pc, head, tile)))
-DEF_DISP_SIMD(V_CAST_FP32_TO_INT64, (Cast<int64_t, float, ROUND::Z>(pc, head, tile)))
-DEF_DISP_SIMD(V_CAST_INT64_TO_FP32, (Cast<float, int64_t, ROUND::Z>(pc, head, tile)))
+DEF_DISP_SIMD(V_CAST_FP32_TO_INT64, (Cast<int64_t, float, RoundMode::CAST_TRUNC>(pc, head, tile)))
+DEF_DISP_SIMD(V_CAST_INT64_TO_FP32, (Cast<float, int64_t, RoundMode::CAST_TRUNC>(pc, head, tile)))
 
 DEF_DISP_LOAD(V_LOAD_VIEW_X, ViewLoadX(pc, head, tile))
 DEF_DISP_LOAD(V_LOAD_VIEW_TRANS, ViewLoadT(pc, head, tile))
