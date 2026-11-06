@@ -1391,7 +1391,7 @@ __aicore_inline__ void ReduceJoinAddBatch(__ubuf__ float *xd, __ubuf__ float *xs
 
 // Keep cross-core register saves/restores out of the per-tile ReduceJoin path;
 // inlining increases scalar overhead even on tiles that do not merge across cores.
-__aicore__ __attribute__((noinline)) void ReduceJoinCrossCore(bcodeptr_t pc, uint64_t head, uint32_t thread_size) {
+__aicore_inline__ void _ReduceJoinCrossCore(bcodeptr_t pc, uint64_t head, uint32_t thread_size) {
   vReduceJoin op;
   vReduceJoin::Decode(pc, head, op);
   uint64_t iter_total = op.iter_num * op.iter_stride;
@@ -1406,27 +1406,6 @@ __aicore__ __attribute__((noinline)) void ReduceJoinCrossCore(bcodeptr_t pc, uin
   uint64_t thread_idx = blockidx % thread_size;
   constexpr uint64_t flag_id = 0;
   uint64_t sync_flag = vFftsSyncConfig(0, flag_id);
-  if (thread_size == 2 && op.iter_num == 1 && iter_total <= 64) {
-    // Only the first core owns output. Keep its local partial in xd and read
-    // just the peer, so no reader depends on the first core's workspace store.
-    if (thread_idx == 0) {
-      ffts_cross_core_sync(PIPE_V, sync_flag);
-    } else {
-      ffts_cross_core_sync(PIPE_MTE3, sync_flag);
-    }
-    wait_flag_dev(PIPE_MTE2, flag_id);
-    vStoreCond::EncodeCond(pc + vReduceJoin::STORE_COND_OFFSET, 64 * thread_idx,
-                           thread_idx == 0 ? iter_total : 0);
-    if (thread_idx == 0) {
-      copy_gm_to_ubuf_align_v2((__ubuf__ uint8_t *)op.xs,
-                               (__gm__ uint8_t *)op.ws + (blockidx + 1) * ws_stride,
-                               0, 1, iter_total * sizeof(float), 0, 0, false, 0, 0, 0);
-      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID6);
-      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID6);
-      vadd_count((__ubuf__ float *)op.xd, (__ubuf__ float *)op.xd, (__ubuf__ float *)op.xs, iter_total);
-    }
-    return;
-  }
   // Batched reads include this core, so every workspace store must finish.
   ffts_cross_core_sync(PIPE_MTE3, sync_flag);
   if (op.iter_num == 1) {
@@ -1450,21 +1429,21 @@ __aicore__ __attribute__((noinline)) void ReduceJoinCrossCore(bcodeptr_t pc, uin
     join_offset = iter_offset * op.iter_stride;
     join_count = iter_range * op.iter_stride;
   }
-  wait_flag_dev(PIPE_MTE2, flag_id);
   vStoreCond::EncodeCond(pc + vReduceJoin::STORE_COND_OFFSET, iter_offset, iter_range);
   if (join_offset >= iter_total) {
+    wait_flag_dev(PIPE_MTE2, flag_id);
     return;
   }
   op.xd += join_offset * sizeof(float);
   op.ws += join_offset * sizeof(float);
   const uint64_t slice_bytes = join_count * sizeof(float);
   const uint64_t ub_stride = (slice_bytes + 31) & ~31ul;
-  const uint64_t batch_max = op.capacity / ub_stride;
-  const bool use_batch = batch_max > 1;
+  const bool use_batch = op.capacity >= 2 * ub_stride;
   const uint64_t group_base = blockidx - thread_idx;
   uint64_t ping = 0;
   set_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
   set_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);
+  wait_flag_dev(PIPE_MTE2, flag_id);
   if (!use_batch) {
     for (uint64_t i = 0; i < thread_size; ++i) {
       if (i == thread_idx) continue;
@@ -1480,6 +1459,7 @@ __aicore__ __attribute__((noinline)) void ReduceJoinCrossCore(bcodeptr_t pc, uin
       ping ^= 1;
     }
   } else {
+    const uint64_t batch_max = op.capacity / ub_stride;
     // thread_size is at most 127 (V_RED_HEAD_THREAD_MASK), within the DMA burst limit.
     for (uint64_t core_begin = 0; core_begin < thread_size; core_begin += batch_max) {
       const uint64_t remaining = thread_size - core_begin;
@@ -1501,6 +1481,9 @@ __aicore__ __attribute__((noinline)) void ReduceJoinCrossCore(bcodeptr_t pc, uin
   wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
   wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);
 }
+
+template <typename... Args>
+__aicore__ __attribute__((noinline)) void ReduceJoinCrossCore(Args... args);
 
 __aicore_inline__ void ReduceJoin(bcodeptr_t pc, uint64_t head, uint64_t tile) {
   vReduceJoin op;
@@ -2564,6 +2547,12 @@ TILE_LOOP:
   pipe_barrier(PIPE_ALL);
 }
 
+#define DEF_NOINLINE_WRAPPER(name) \
+  template <typename... Args> \
+  __aicore__ __attribute__((noinline)) void name(Args... args) { \
+    _##name(args...); \
+  }
+
 #define DEF_DISP_SIMD(OP, func) \
   extern "C" __aicore__ void D_##OP(bcodeptr_t pc, uint64_t head, uint64_t tile) { func; } \
   DEF_DRY_FUNC(g_simd_func_offset_c310, OP, D_##OP);
@@ -2761,6 +2750,8 @@ DEF_DISP_STORE(V_STORE_COND, CondStore(pc, head, tile))
 DEF_DISP_STORE(V_STORE_VIEW_X, ViewStoreX(pc, head, tile))
 DEF_DISP_LOAD(V_LOAD_GATHER_B16, GatherLoad<uint16_t>(pc, head, tile))
 DEF_DISP_LOAD(V_LOAD_GATHER_B32, GatherLoad<uint32_t>(pc, head, tile))
+
+DEF_NOINLINE_WRAPPER(ReduceJoinCrossCore)
 
 DEF_DISP_VISIT(V_VISIT_RED_1, VisitRed_1)
 DEF_DISP_VISIT(V_VISIT_RED_2, VisitRed_2)
