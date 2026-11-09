@@ -211,6 +211,30 @@ def test_dynamic_same_shape_multi_output_codegen(request):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.skipif(dvm.Device.arch() != "AscendC310", reason="VF Fusion only supports C310")
+def test_dynamic_mix_preserves_vf_edges_codegen():
+    dvm.Kernel.set_vf_fusion(2)
+    t = Tester("mix:dyn", use_pass_opt=True)
+    x = t.load([-1, 512], "float16")
+    w = t.load([768, 512], "float16")
+    gate = t.load([-1, 768], "float16")
+    shape = t.int_array()
+    mm = t.matmul(x, w, False, True)
+    value = t.cast(t.reshape(gate, shape), "float32")
+    value = t.cast(t.abs(t.abs(value)), "float16")
+    t.store(mm)
+    t.store(t.mul(value, t.reshape(mm, shape)))
+
+    for batch, seq in [(2, 128), (2, 128), (3, 96)]:
+        t.input(x, np.zeros((batch * seq, 512), dtype=np.float16))
+        t.input(w, np.zeros((768, 512), dtype=np.float16))
+        t.input(gate, np.zeros((batch * seq, 768), dtype=np.float16))
+        shape.update([batch, seq, 768])
+        t.codegen()
+        assert "Custom" in t.dump()
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.skipif(
     dvm.Device.arch() != "AscendC310",
     reason="VF Fusion only supports C310",
@@ -351,6 +375,36 @@ def test_spec_vf_fusion_clone(request):
     out = t.mul(reduced, 0.5)
     expect = np.sum(np.abs(input_np) + 0.25, axis=(0,), keepdims=True) * 0.5
     t.store_expect(out, expect)
+
+    assert t.run_check()
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.skipif(dvm.Device.arch() != "AscendC310", reason="VF Fusion only supports C310")
+def test_spec_cast():
+    dvm.Kernel.set_vf_fusion(2)
+    t = Tester("vector:spec", use_pass_opt=True)
+    shape = (8, 128, 1024)
+    rng = np.random.default_rng(17)
+
+    arrays = [rng.normal(0.0, 0.1, shape).astype(np.float16) for _ in range(3)]
+    scale_np = rng.uniform(0.5, 1.0, (*shape[:2], 1)).astype(np.float32)
+    x, y, z = [t.load(array, "float16") for array in arrays]
+    scale = t.load(scale_np)
+    # The add starts a consumer partition before its producer cast partition
+    # starts. Sorting partitions by their first node reverses this dependency.
+    add = t.add(x, y)
+    expanded = t.broadcast(scale, shape)
+    product = t.cast(t.mul(t.cast(z, "float32"), expanded), "float16")
+    value = t.cast(t.mul(add, product), "float32")
+    reduced = t.sum(value, (0, 1), True)
+    t.spec_next()
+    out = t.cast(reduced, "float16")
+    add_np = (arrays[0] + arrays[1]).astype(np.float16)
+    product_np = (arrays[2].astype(np.float32) * scale_np).astype(np.float16)
+    value_np = (add_np * product_np).astype(np.float16).astype(np.float32)
+    expect = np.sum(value_np, axis=(0, 1), keepdims=True).astype(np.float16)
+    t.store_expect(out, expect, eps=1e-3)
 
     assert t.run_check()
 

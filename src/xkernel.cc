@@ -878,7 +878,7 @@ uint64_t DynMixKernel::CodeGen() {
     }
     mng_.clear();
   }
-  if (post_fusion_) {
+  if (post_fusion_ && g_system.Arch() == kAiCore_C220) {
     if (tracker_.Empty()) {
       for (auto op : post_fusion_->build_ops_) {
         op->ForInput([this](NDObject *&in) { tracker_.Record(&in); });

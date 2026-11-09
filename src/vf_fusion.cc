@@ -1510,6 +1510,48 @@ std::vector<VfPartition> SplitPartition(const VfGraphContext &graph, const VfPar
   return result;
 }
 
+std::vector<const VfPartition *> ConsumerFirstOrder(const std::vector<VfPartition> &partitions) {
+  NodeIndex producers;
+  for (size_t i = 0; i < partitions.size(); ++i) {
+    for (auto *output : partitions[i].outputs) {
+      producers.emplace(output, i);
+    }
+  }
+  std::vector<size_t> consumer_counts(partitions.size());
+  for (const auto &partition : partitions) {
+    for (auto *input : partition.inputs) {
+      if (const auto producer = producers.find(input); producer != producers.end()) {
+        ++consumer_counts[producer->second];
+      }
+    }
+  }
+
+  // Break ties in the previous reverse-list order.
+  std::priority_queue<size_t> ready;
+  for (size_t i = 0; i < partitions.size(); ++i) {
+    if (consumer_counts[i] == 0) {
+      ready.push(i);
+    }
+  }
+  std::vector<const VfPartition *> order;
+  order.reserve(partitions.size());
+  while (!ready.empty()) {
+    const size_t consumer = ready.top();
+    ready.pop();
+    order.push_back(&partitions[consumer]);
+    for (auto *input : partitions[consumer].inputs) {
+      if (const auto producer = producers.find(input);
+          producer != producers.end() && --consumer_counts[producer->second] == 0) {
+        ready.push(producer->second);
+      }
+    }
+  }
+  if (order.size() != partitions.size()) {
+    return {};
+  }
+  return order;
+}
+
 void VfFusion(BasicBlock &bb) {
   if (!g_system.vf_fusion_) {
     return;
@@ -1552,14 +1594,14 @@ void VfFusion(BasicBlock &bb) {
     return;
   }
 
-  // Process consumers first.  This makes a later producer replacement update
-  // the already-created downstream Custom input through BasicBlock edges.
-  for (auto it = partitions.rbegin(); it != partitions.rend(); ++it) {
-    const auto function = functions.find(VfFusionCompiler::NamespaceFor(*it));
+  // first_index does not order interleaved partitions. Rewrite consumers first
+  // so producer replacements only update inputs of already-created Customs.
+  for (const auto *partition : ConsumerFirstOrder(partitions)) {
+    const auto function = functions.find(VfFusionCompiler::NamespaceFor(*partition));
     if (function == functions.end()) {
       continue;
     }
-    RewritePartition(bb, *it, function->second, bb.is_dynamic_);
+    RewritePartition(bb, *partition, function->second, bb.is_dynamic_);
   }
 }
 
