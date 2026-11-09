@@ -13,10 +13,33 @@
 # limitations under the License.
 # ============================================================================
 
-import pytest
 import numpy as np
 from dvm.tester import Tester
 from tests.mark_utils import arg_mark
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+def test_reduce_bytecode_reserve():
+    """Reserve bytecode space for multiple deterministic reductions."""
+    t = Tester("vector", use_pass_opt=True)
+    t.set_deterministic(True)
+    rng = np.random.default_rng(0)
+    shapes = [(1, 128, 128), (128, 128), (1, 128, 128), (128,)]
+    a, b, c, weight = [rng.normal(0, 0.5, shape).astype(np.float32) for shape in shapes]
+    x0, x1, x2, x3 = [t.load(data) for data in (a, b, c, weight)]
+    sum_a = t.sum(t.reshape(x0, [128, 128]), [0], True)
+    added = t.add(x0, t.reshape(x1, [1, 128, 128]))
+    sum_added = t.sum(added, [0, 1], True)
+    sum_product = t.sum(t.mul(added, x2), [0, 1], True)
+    weighted = t.mul(added, t.broadcast(x3, [1, 128, 128]))
+    expected_added = a + b.reshape(1, 128, 128)
+    t.store_expect(sum_a, a.reshape(128, 128).sum(axis=0, keepdims=True), eps=1e-4)
+    t.store_expect(sum_added, expected_added.sum(axis=(0, 1), keepdims=True), eps=1e-4)
+    t.store_expect(sum_product, (expected_added * c).sum(axis=(0, 1), keepdims=True), eps=1e-4)
+    t.store_expect(weighted, expected_added * weight.reshape(1, 1, 128), eps=1e-4)
+    result = t.run_check()
+    t.set_deterministic(False)
+    assert result
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')

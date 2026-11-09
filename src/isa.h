@@ -852,6 +852,7 @@ struct vReduceY {
 };
 
 struct vReduceJoin {
+  enum { CODE_SIZE = 5 };  // uint64_t words, including the conditional store state
   enum { STORE_COND_OFFSET = 3 };
   enum { RELOC_OFFSET = 2 };
   uint64_t iter_num;
@@ -879,7 +880,7 @@ struct vReduceJoin {
     op.capacity = pc[4];
   }
   __aicore_inline__ uint64_t Encode(bcodeptr_t pc, const vReduceJoin &op) {
-    constexpr uint64_t size = 5;
+    constexpr uint64_t size = CODE_SIZE;
     pc[0] = vMakeSimdHead(V_RSUM_JOIN, vCompactX(op.xd) << V_C_X_BITS, size);
     pc[1] = op.iter_num << 48 | op.iter_stride << 31 | vCompactX(op.xs) << 18 | op.xn;
     pc[2] = op.ws;

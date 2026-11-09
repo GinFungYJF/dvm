@@ -2860,8 +2860,11 @@ void ReduceOp::TileCollect(NDObject *op, TileInfo &info) {
     if (range_num > 1) {
       info.code_reserve += sizeof(uint64_t) * 3 * range_num;
     }
-    if (self->ws_num_ == 2 && info.event_reserve < 2) {
-      info.event_reserve = 2;
+    if (self->ws_num_ == 2) {
+      info.code_reserve += RedVisitCoder::BCODE_MAX + vReduceJoin::CODE_SIZE * sizeof(uint64_t);
+      if (info.event_reserve < 2) {
+        info.event_reserve = 2;
+      }
     }
     info.flags |= ObjectMeta::kSimdDim;
   }

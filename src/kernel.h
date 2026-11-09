@@ -106,7 +106,8 @@ class VectorKernel : public VKernel {
     MESS(max_type_, 100);
     MESS(min_type_, 200);
     MESS(visit_, reinterpret_cast<VisitCoder *>(100));
-    tile_info_.code_reserve = 0; // TODO: mix get ReserveCodeSize before TileCollect
+    // Reserve the zero instruction terminator before Mix calls TileCollect.
+    tile_info_.code_reserve = sizeof(uint64_t);
   }
   ~VectorKernel() override = default;
 

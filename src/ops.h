@@ -106,7 +106,8 @@ struct TileInfo {
     lead_affine = PropRange::ELEMWISE;
     flags = affine_only ? kAffineOnlyFlags : 0;
     ext_ws = 0;
-    code_reserve = SIMD_BLOCK_SIZE;
+    // VM register table and zero instruction terminator.
+    code_reserve = SIMD_BLOCK_SIZE + sizeof(uint64_t);
     event_reserve = 0;
   }
   bool IsGen() const { return flags != kAffineOnlyFlags; }
