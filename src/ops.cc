@@ -1190,6 +1190,9 @@ void NDViewLoad::DimChanged(NDObject *op) {
     } else {
       acc_stride *= dims[i - 1];
       acc_nd *= dims[i];
+    }
+    // Complete the current reference-axis match for both merged and split axes.
+    if (acc_nd) {
       while (acc_ref < acc_nd) {
         acc_ref *= ref_shape[ref_idx--];
       }
@@ -1259,6 +1262,9 @@ void NDViewStore::DimChanged(NDObject *op) {
     } else {
       acc_stride *= dims[i - 1];
       acc_nd *= dims[i];
+    }
+    // Complete the current reference-axis match for both merged and split axes.
+    if (acc_nd) {
       while (acc_ref < acc_nd) {
         acc_ref *= ref_shape->data[ref_idx--];
       }
