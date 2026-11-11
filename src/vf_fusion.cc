@@ -941,7 +941,7 @@ void VfCceInstructionEmitter::EmitCast(size_t index, const VfInstruction &instru
   source_ << "      vcvt(" << Value(instruction.node) << ", " << Value(instruction.inputs[0]) << ", "
           << program_.mask_name;
   if (source_type == kFloat32 && target_type == kFloat16) {
-    source_ << ", VfRound<ROUND::A>(), RS_ENABLE, PART_EVEN";
+    source_ << ", VfRound<ROUND::R>(), RS_ENABLE, PART_EVEN";
   } else if (source_type == kFloat32 && target_type == kBFloat16) {
     source_ << ", VfRound<ROUND::R>(), RS_ENABLE, PART_EVEN";
   } else if (source_type == kFloat32 && target_type == kInt32) {

@@ -2421,7 +2421,7 @@ DEF_DISP_SIMD(V_MAX, BINARY(pc, vmax, head, tile, float))
 
 DEF_DISP_SIMD(V_CMP, BinCompare<float>(pc, head, tile))
 DEF_DISP_SIMD(V_CMPS, BinCompareS<float>(pc, head, tile))
-DEF_DISP_SIMD(V_CAST_FP32_TO_FP16, (Cast<half, float>(pc, head, tile)))
+DEF_DISP_SIMD(V_CAST_FP32_TO_FP16, (Cast<half, float, RoundMode::CAST_RINT>(pc, head, tile)))
 DEF_DISP_SIMD(V_CAST_FP32_TO_INT32, (Cast<int32_t, float>(pc, head, tile)))
 DEF_DISP_SIMD(V_RSUM_X, (ReduceX<V_RED_SUM, float>(pc, head, tile)))
 DEF_DISP_SIMD(V_RSUM_Y, (ReduceY<V_RED_SUM, float>(pc, head, tile)))
