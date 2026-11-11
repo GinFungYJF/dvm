@@ -1467,7 +1467,7 @@ int64_t VectorKernel::TileSizeLimit(int64_t live_peak) {
     for (size_t i = 0; i < static_ops_.size(); ++i) {
       auto op = static_ops_[i];
       if ((i < load_num_ || !op->lhs_->NeedFullXbuf()) && !lead_pointwise(op->nd_.dims(), tile_depth)) {
-        peak_size -= init_size_limit - block_align_;
+        peak_size -= (init_size_limit - block_align_) * ITEM_SIZE[op->type_id_];
       }
     }
     return xbuf_mem_size * init_size_limit / peak_size;
@@ -1494,7 +1494,7 @@ int64_t VectorKernel::TileSizeLimit(int64_t live_peak) {
       for (; depth < tile_depth; ++depth) {
         space *= dims[depth];
       }
-      peak_size -= tile_space - space;
+      peak_size -= (tile_space - space) * ITEM_SIZE[op->type_id_];
     }
   }
   return xbuf_mem_size * tile_space / peak_size;

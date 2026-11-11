@@ -202,14 +202,26 @@ float GetRedInitScalar(int red_op) {
 }
 
 uint64_t GetDynXBufBegin(const VectorKernel &k, NDObject *cur) {
-  uint64_t xnum = 1;
+  auto xbuf_size = [&k](NDObject *op) -> uint64_t {
+    if (op->NeedFullXbuf()) {
+      return k.tile_size_ * ITEM_SIZE[op->type_id_];
+    }
+    auto &dims = op->nd_.dims();
+    size_t i = dims.lead_dim();
+    int64_t size = RoundUp<int64_t>(dims[i], k.LeadAlign()) * ITEM_SIZE[op->type_id_];
+    for (++i; i < dims.size(); ++i) {
+      size *= dims[i];
+    }
+    return size;
+  };
+  uint64_t xbuf = cur->xbuf_ + xbuf_size(cur);
   for (size_t i = 0; i < k.static_ops_.size(); ++i) {
     auto op = i < k.load_num_ ? k.static_ops_[i] : k.static_ops_[i]->lhs_;
     if (op->index_ > cur->index_) {
-      xnum++;
+      xbuf += xbuf_size(op);
     }
   }
-  return cur->xbuf_ + xnum * k.tile_size_ * ITEM_SIZE[k.MaxType()];
+  return xbuf;
 }
 }  // namespace
 
