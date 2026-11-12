@@ -206,6 +206,8 @@ void CompactPeakLiveness(BasicBlock &bb);
 /// ----------
 void EliminateReshape(BasicBlock &bb);
 
+void AxpyFusion(BasicBlock &bb);
+
 /// @brief Fuse supported C310 pointwise subgraphs into a JIT Custom op.
 /// The pass is gated by the default-off Config VF fusion switch.
 void VfFusion(BasicBlock &bb);

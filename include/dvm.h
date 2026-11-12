@@ -373,6 +373,15 @@ class DVM_API Kernel {
   NDObject *Binary(L lhs, R rhs);
 
   /**
+   * @brief Compute self + alpha * other with broadcasting.
+   * Both inputs must be float32. Broadcasting follows the binary operations.
+   * Returns nullptr for unsupported input dtypes.
+   * @param alpha float32 scalar coefficient.
+   */
+  template <typename T>
+  NDObject *Axpy(NDObject *self, NDObject *other, T alpha);
+
+  /**
    * @brief Emit a reduce operation.
    * @param op_type reduce operation type.
    * @param input input operation to reduce.

@@ -467,6 +467,30 @@ __aicore_inline__ void LogicalNotBool(bcodeptr_t pc, uint64_t head, uint64_t til
   vsub_count<int8_t, false>(xd, xn, static_cast<int8_t>(1), op.count);
 }
 
+__aicore_inline__ void Axpy(bcodeptr_t pc, uint64_t head) {
+  vAxpy op;
+  vAxpy::Decode(pc, head, op);
+  auto xd = (__ubuf__ float *)op.xd;
+  auto xn = (__ubuf__ float *)op.xn;
+  auto xm = (__ubuf__ float *)op.xm;
+  float alpha = vAxpy::GetScalar(pc);
+  __VEC_SCOPE__ {
+    vector_f32 accumulator;
+    vector_f32 other;
+    uint32_t count = op.count;
+    uint32_t width = BlockNum(float);
+    uint16_t repeat = CeilDiv(count, width);
+    constexpr auto dist = std::integral_constant<DistVST, DistSTValue<float>()>();
+    for (uint16_t i = 0; i < repeat; ++i) {
+      auto mask = UpdateMask<float>(count);
+      vlds(accumulator, xn, i * width, NORM);
+      vlds(other, xm, i * width, NORM);
+      vaxpy(accumulator, other, alpha, mask, MODE_ZEROING);
+      vsts(accumulator, xd, i * width, dist, mask);
+    }
+  }
+}
+
 #define BINARYS(pc, builtin, head, VTYPE)           \
   do {                                              \
     vBinaryS op;                                    \
@@ -2523,6 +2547,7 @@ DEF_DISP_SIMD(V_LOGICAL_AND_BOOL, BINARY(pc, vand, head, tile, int8_t))
 DEF_DISP_SIMD(V_LOGICAL_OR_BOOL, BINARY(pc, vor, head, tile, int8_t))
 DEF_DISP_SIMD(V_CMP_BOOL, BinCompare<int8_t>(pc, head, tile))
 DEF_DISP_SIMD(V_CMPS_BOOL, BinCompareS<int8_t>(pc, head, tile))
+DEF_DISP_SIMD(V_AXPY, Axpy(pc, head))
 DEF_DISP_SIMD(V_CUSTOM, Custom(pc, head, tile))
 
 DEF_DISP_VISIT(V_VISIT_MIX, VisitMix)

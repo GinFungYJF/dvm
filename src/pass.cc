@@ -835,6 +835,52 @@ void EliminateDiamondView(BasicBlock &bb) {
   }
 }
 
+void AxpyFusion(BasicBlock &bb) {
+  if (g_system.Arch() != kAiCore_C310) {
+    return;
+  }
+  auto match = [&bb](NDObject *obj) -> BinaryScalarOp * {
+    if (obj->GetObjectType() != kBinaryS || obj->type_id_ != kFloat32 || bb.GetUserNum(obj) != 1) {
+      return nullptr;
+    }
+    auto mul = static_cast<BinaryScalarOp *>(obj);
+    return mul->GetOpType() == kMuls && !mul->IsScalarRef() && mul->lhs_->type_id_ == kFloat32 ? mul : nullptr;
+  };
+  std::unordered_map<IntArrayRef *, IntArrayRef *> shapes;
+  for (auto obj = bb.Begin(); obj != bb.End();) {
+    auto next = bb.Next(obj);
+    if (auto shape = shapes.find(obj->shape_ref_); shape != shapes.end()) {
+      obj->shape_ref_ = shape->second;
+    }
+    if (obj->GetObjectType() == kBinary && obj->type_id_ == kFloat32 &&
+        static_cast<BinaryOp *>(obj)->GetOpType() == kAdd) {
+      auto self = obj->lhs_;
+      auto mul = match(obj->rhs_);
+      if (mul == nullptr) {
+        self = obj->rhs_;
+        mul = match(obj->lhs_);
+      }
+      if (mul != nullptr && self->type_id_ == kFloat32) {
+        auto fused = new AxpyOp(self, mul->lhs_, mul->GetScalar());
+        if (bb.is_dynamic_) {
+          shapes[obj->shape_ref_] = fused->shape_ref_;
+        } else {
+          std::vector<NDObject *> stuff;
+          fused->Normalize(stuff);
+          ASSERT(stuff.empty());
+        }
+        bb.Insert(obj, fused);
+        for (auto user : bb.GetUsers(obj)) {
+          bb.UpdateInput(user, obj, fused);
+        }
+        bb.Erase(obj);
+        bb.Erase(mul);
+      }
+    }
+    obj = next;
+  }
+}
+
 #ifdef DVM_ARCH_GPU
 class PassOptimizerGpu : public PassOptimizer {
  public:
@@ -878,6 +924,7 @@ class PassOptimizerC310 : public PassOptimizer {
       EliminateReshape(bb);
     }
     EliminateDiamondView(bb);
+    AxpyFusion(bb);
     CompactPeakLiveness(bb);
     VfFusion(bb);
     ReorderLoad(bb);

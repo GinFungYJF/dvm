@@ -599,6 +599,13 @@ void DumpBinary(const DumpInfo &dump_info, std::ostringstream &oss) {
   oss << ", " << reinterpret_cast<void *>(op.xm);
 }
 
+void DumpAxpy(const DumpInfo &dump_info, std::ostringstream &oss) {
+  vAxpy op;
+  vAxpy::Decode(dump_info.insn, *dump_info.insn, op);
+  oss << op.count << " " << reinterpret_cast<void *>(op.xd) << ", " << reinterpret_cast<void *>(op.xn)
+      << ", " << reinterpret_cast<void *>(op.xm) << ", " << vAxpy::GetScalar(dump_info.insn);
+}
+
 void DumpBinaryWS(const DumpInfo &dump_info, std::ostringstream &oss) {
   vBinaryWS op;
   vBinaryWS::Decode(dump_info.insn, *dump_info.insn, op);
@@ -963,6 +970,7 @@ std::unordered_map<uint64_t, std::tuple<DumpFunc *, std::string, std::string>> o
   {V_MINS_FP16, {&DumpBinaryS<Float16>, "Maximums", "fp16"}},
   {V_MINS_BF16, {&DumpBinaryS<dvm::BFloat16>, "Maximums", "bf16"}},
   {V_MINS_INT32, {&DumpBinaryS<int32_t>, "Maximums", "int32"}},
+  {V_AXPY, {&DumpAxpy, "Axpy", "fp32"}},
   {V_ADD, {&DumpBinary, "Add", "fp32"}},
   {V_ADD_FP16, {&DumpBinary, "Add", "fp16"}},
   {V_ADD_BF16, {&DumpBinary, "Add", "bf16"}},

@@ -132,6 +132,14 @@ class DVM_API KernelPy {
     return ObjToPy(op);
   }
 
+  py::object Axpy(py::object self, py::object other, float alpha) {
+    auto obj = kernel_.Axpy(PyToObj(self), PyToObj(other), alpha);
+    if (obj == nullptr) {
+      return py::none();
+    }
+    return ObjToPy(obj);
+  }
+
   template <ReduceOpType op_type>
   py::object Reduce(py::object input, py::object dims, bool keepdims) {
     return ObjToPy(kernel_.Reduce<op_type>(PyToObj(input), GetShapeRef(dims), keepdims));
@@ -331,6 +339,7 @@ static inline void RegDvmPy(const py::module &m) {
     .def("greater_equal", &KernelPy::Binary<BinaryOpType::kGreaterEqual>, "emit greater_equal")
     .def("less", &KernelPy::Binary<BinaryOpType::kLess>, "emit less")
     .def("less_equal", &KernelPy::Binary<BinaryOpType::kLessEqual>, "emit less_equal")
+    .def("axpy", &KernelPy::Axpy, "emit FP32 self + alpha * other")
     .def("add", &KernelPy::Binary<BinaryOpType::kAdd>, "emit add")
     .def("sub", &KernelPy::Binary<BinaryOpType::kSub>, "emit sub")
     .def("mul", &KernelPy::Binary<BinaryOpType::kMul>, "emit mul")

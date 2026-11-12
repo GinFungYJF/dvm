@@ -1019,6 +1019,20 @@ class BinaryOp : public NDObject {
   _BinaryNormalizer norm_;
 };
 
+class AxpyOp : public BinaryOp {
+ public:
+  AxpyOp(NDObject *self, NDObject *other, scode_t alpha)
+      : BinaryOp(kOpType, self, other), alpha_(alpha) {}
+  uint64_t Emit(VectorKernel &k) override;
+  NDObject *Clone(CloneHelper &h) override;
+  void Dump(bool verbose, std::ostringstream &oss) override;
+  void Inspect(Inspector &sp) override;
+
+ private:
+  static constexpr int kOpType = kBinaryTypeEnd;
+  scode_t alpha_;
+};
+
 class PowerOp : public FlexOp {
  public:
   PowerOp(NDObject *lhs, NDObject *rhs) : FlexOp(lhs, rhs, lhs->type_id_, ObjectType::kPower) {

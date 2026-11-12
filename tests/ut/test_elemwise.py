@@ -54,6 +54,39 @@ def test_binary(type, op, func):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
+def test_axpy():
+    t = Tester(use_pass_opt=True)
+    a = np.arange(131, dtype=np.float32) / 16
+    b = np.arange(131, dtype=np.float32)[::-1].copy() / 8
+    x = t.load(a)
+    y = t.mul(t.load(b), 2.0)
+    value = t.axpy(x, y, -0.25)
+    t.store_expect(t.add(value, x), a - 0.25 * (b * 2) + a)
+    t.store_expect(x, a)
+    assert t.run_check()
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.skipif(dvm.Device.arch() != 'AscendC310', reason='Axpy fusion is C310 only')
+def test_axpy_fusion_dynamic():
+    t = Tester('vector:dyn', use_pass_opt=True)
+    x, y = t.load([], 'float32'), t.load([], 'float32')
+    value = t.add(t.mul(y, -0.25), x)
+    out = t.store(t.abs(t.abs(value)))
+    shapes = [((131,), (131,)), ((3, 1), (1, 257)),
+              ((2, 3, 1, 17), (1, 3, 9, 17)), ((1,), (7, 131)), ((131,), (131,))]
+    for left, right in shapes:
+        a = np.arange(np.prod(left), dtype=np.float32).reshape(left) / 16
+        b = np.arange(np.prod(right), dtype=np.float32).reshape(right) / 8
+        t.input(x, a)
+        t.input(y, b)
+        t.run()
+        assert t.check(out, np.abs(a - 0.25 * b), 0)
+        assert 'Axpy.fp32' in t.das()
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('type', [np.bool_, np.float16, np.float32])
 @pytest.mark.parametrize("shape", [(1024, 32), (1312, 131), (16, 11), (128, 7), (128, 777)])
 @pytest.mark.parametrize('op, func', [(Tester.logical_or, np.logical_or), (Tester.logical_and, np.logical_and)])

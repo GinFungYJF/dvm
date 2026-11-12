@@ -637,6 +637,7 @@ void RtKernelPy::CodeGen(py::object pass_names) {
         {"EliminateReshape", {pass::EliminateReshape, true}},
         {"EliminateDiamondView", {pass::EliminateDiamondView, false}},
         {"InsertRemovePad", {pass::InsertRemovePad, false}},
+        {"AxpyFusion", {pass::AxpyFusion, false}},
         {"VfFusion", {pass::VfFusion, false}}};
       for (auto &name : names_) {
         auto pass = pass_map.find(name);

@@ -224,6 +224,7 @@ enum vSimdInsnID {
 
   V_CUSTOM,
   V_COPY_CUBE_TILE,  // [c310]
+  V_AXPY,  // [c310]
   V_NONE,
 };
 
@@ -518,6 +519,33 @@ struct vBinary {
     pc[0] = vMakeSimdHead(id, op.xn, size);
     pc[1] = op.count << 48 | op.xd << 18 | op.xm;
     return size;
+  }
+};
+
+struct vAxpy {
+  uint64_t xd;
+  uint64_t xn;
+  uint64_t xm;
+  uint64_t count;
+  uint64_t scalar;
+  // pc[0]: xn(18)
+  // pc[1]: count(16) << 48 | xd(18) << 18 | xm(18)
+  // pc[2]: FP32 alpha bits
+  __aicore_inline__ void Decode(bcodeptr_t pc, uint64_t head, vAxpy &op) {
+    op.xn = (head >> V_HEAD_EXT_OFFSET) & V_X_MASK;
+    uint64_t data = pc[1];
+    op.xm = data & V_X_MASK;
+    op.xd = (data >> 18) & V_X_MASK;
+    op.count = data >> 48;
+  }
+  __aicore_inline__ float GetScalar(bcodeptr_t pc) {
+    return DecodeScalar<float>((__bcode__ uint32_t *)pc + 4);
+  }
+  __aicore_inline__ uint64_t Encode(bcodeptr_t pc, uint64_t id, const vAxpy &op) {
+    pc[0] = vMakeSimdHead(id, op.xn, 3);
+    pc[1] = op.count << 48 | op.xd << 18 | op.xm;
+    pc[2] = op.scalar;
+    return 3;
   }
 };
 

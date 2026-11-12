@@ -60,7 +60,9 @@ static const InsnIdTable binary_id_list[] = {
   {"Maximum", {V_NONE, V_MAX_FP16, V_MAX_BF16, V_MAX, V_MAX_INT32, V_NONE}},
   {"Minimum", {V_NONE, V_MIN_FP16, V_MIN_BF16, V_MIN, V_MIN_INT32, V_NONE}},
   {"LogicalAnd", {V_LOGICAL_AND_BOOL, V_MIN_FP16, V_MAX_BF16, V_MIN, V_MIN_INT32, V_NONE}},
-  {"LogicalOr", {V_LOGICAL_OR_BOOL, V_MAX_FP16, V_MIN_BF16, V_MAX, V_MAX_INT32, V_NONE}}};
+  {"LogicalOr", {V_LOGICAL_OR_BOOL, V_MAX_FP16, V_MIN_BF16, V_MAX, V_MAX_INT32, V_NONE}},
+  // AxpyOp uses a private tag at kBinaryTypeEnd and encodes alpha separately.
+  {"Axpy", {V_NONE, V_NONE, V_NONE, V_NONE, V_NONE, V_NONE}}};
 
 static const InsnIdTable binarys_id_list[] = {
   // must keep consistent order with BinarySOpType
@@ -2517,6 +2519,34 @@ static void BinaryShapeProp(const IntArrayRef *lhs, const IntArrayRef *rhs, Shap
 void BinaryOp::ShapeProp(NDObject *op, int64_t &sym_dim_next) {
   return BinaryShapeProp(op->lhs_->shape_ref_, op->rhs_->shape_ref_, static_cast<BinaryOp *>(op)->norm_.shape_,
                          sym_dim_next);
+}
+
+uint64_t AxpyOp::Emit(VectorKernel &k) {
+  vAxpy op;
+  op.xd = xbuf_;
+  op.xn = lhs_->xbuf_;
+  op.xm = rhs_->xbuf_;
+  op.count = nd_.stride_back();
+  op.scalar = alpha_;
+  return vAxpy::Encode(insn_, V_AXPY, op);
+}
+
+NDObject *AxpyOp::Clone(CloneHelper &h) {
+  auto lhs = norm_.lhs_stuff_ == nullptr ? lhs_ : norm_.lhs_stuff_->lhs_;
+  auto rhs = norm_.rhs_stuff_ == nullptr ? rhs_ : norm_.rhs_stuff_->lhs_;
+  return new AxpyOp(h.GetClone(lhs), h.GetClone(rhs), alpha_);
+}
+
+void AxpyOp::Dump(bool verbose, std::ostringstream &oss) {
+  oss << "Axpy(";
+  DumpScalarCode(oss, alpha_, type_id_);
+  oss << ")";
+}
+
+void AxpyOp::Inspect(Inspector &sp) {
+  if (type_id_ != kFloat32 || lhs_->type_id_ != kFloat32 || rhs_->type_id_ != kFloat32) {
+    sp.Error("AxpyType") << "Axpy requires float32 inputs.\n";
+  }
 }
 
 uint64_t CompareOp::Emit(VectorKernel &k) {

@@ -1412,6 +1412,22 @@ DEF_BINARY(BinaryType::kMinimum);
 DEF_BINARY(BinaryType::kLogicalAnd);
 DEF_BINARY(BinaryType::kLogicalOr);
 
+template <typename T>
+NDObject *Kernel::Axpy(NDObject *self, NDObject *other, T alpha) {
+  if (self->type_id_ != kFloat32 || other->type_id_ != kFloat32) {
+    return nullptr;
+  }
+  if (g_system.Arch() == kAiCore_C310) {
+    auto obj = new AxpyOp(self, other, EncodeScalar(alpha, self->type_id_));
+    kernel_->Append(obj);
+    return obj;
+  }
+  auto scaled = Binary<BinaryType::kMul>(other, alpha);
+  return Binary<BinaryType::kAdd>(self, scaled);
+}
+
+template NDObject *Kernel::Axpy<float>(NDObject *, NDObject *, float);
+
 NDObject *Kernel::Select(NDObject *cond, NDObject *lhs, NDObject *rhs) {
   if (lhs->type_id_ == kInt64) {
     cond = NoLossCast(this, cond, kInt32);
