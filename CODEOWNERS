@@ -6,5 +6,5 @@
 # Each line corresponds to a specified file or directory and maintainer by @ splitting.
 # The rules are applied from top to bottom, and the last matching rule will take effect.
 
-# If the file in PR does not match rule, the default maintainer gaoxiong1 will be designated to conduct code review.
-* @gaoxiong1
+# If the file in PR does not match rule, the default maintainer gaoxiong-1 will be designated to conduct code review.
+* @gaoxiong-1
