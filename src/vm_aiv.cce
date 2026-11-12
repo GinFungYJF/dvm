@@ -1371,8 +1371,8 @@ template <typename T>
 __aicore_inline__ void ViewLoadXFixedGather(__ubuf__ T *dst, __ubuf__ T *ws, __gm__ uint8_t *src,
                                             uint64_t iter_offset, uint64_t iter_size, uint64_t iter_stride,
                                             uint64_t stride_elem, uint8_t pattern_mode, event_t event) {
-  copy_gm_to_ubuf_align_b8(ws, src + iter_offset * iter_stride, 0, 1, sizeof(T) * iter_size * stride_elem, 0, 0,
-                           0, 0);
+  copy_gm_to_ubuf_align_b8(ws, src + iter_offset * iter_stride, 0, 1,
+                           (iter_size - 1) * stride_elem * sizeof(T) + sizeof(T), 0, 0, 0, 0);
   set_flag(PIPE_MTE2, PIPE_V, event);
   wait_flag(PIPE_MTE2, PIPE_V, event);
   set_vector_mask(0, iter_size * stride_elem);
@@ -1383,8 +1383,8 @@ template <typename T>
 __aicore_inline__ void ViewLoadXCustomGather(__ubuf__ T *dst, __ubuf__ T *ws, __gm__ uint8_t *src,
                                              uint64_t iter_offset, uint64_t iter_size, uint64_t iter_stride,
                                              uint64_t stride_elem, event_t event) {
-  copy_gm_to_ubuf_align_b8(ws, src + iter_offset * iter_stride, 0, 1, sizeof(T) * iter_size * stride_elem, 0, 0,
-                           0, 0);
+  copy_gm_to_ubuf_align_b8(ws, src + iter_offset * iter_stride, 0, 1,
+                           (iter_size - 1) * stride_elem * sizeof(T) + sizeof(T), 0, 0, 0, 0);
   set_flag(PIPE_MTE2, PIPE_V, event);
   wait_flag(PIPE_MTE2, PIPE_V, event);
   uint64_t repeat = iter_size / 32;
