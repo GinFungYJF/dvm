@@ -1,62 +1,204 @@
-# Device Virtual Machine(DVM)
+<!-- markdownlint-disable MD033 MD041 -->
+<!-- The centered header, navigation anchors, and QR image use HTML for layout and sizing. -->
 
+<div align="center">
+  <h1>Device Virtual Machine (DVM)</h1>
 
-| [技术论文](https://arxiv.org/abs/2603.24239) | [用户手册](docs/tutorial.md) | [如何在TorchNPU中使用](docs/pytorch.md) | [Example示例](examples) | [DVM开发](docs/development.md) |
+[![WeChat community](https://img.shields.io/badge/WeChat-64A519?style=flat&logo=wechat&logoColor=07C160)](#akg-sig)
+[![Documentation](https://img.shields.io/badge/Document-0088CC?style=flat&logo=readthedocs&logoColor=white)](#documentation)
+[![Paper](https://img.shields.io/badge/Paper-red?style=flat&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2603.24239)
+
+  <h3>Microsecond-Scale Compilation &nbsp;·&nbsp; Dynamic Tensor Execution</h3>
+
+  <p><strong>English</strong> | <a href="README.zh.md">简体中文</a></p>
+
+  <p>
+    <a href="#quick-start">Quick Start</a>
+    &emsp;·&emsp;
+    <a href="#documentation">Documentation</a>
+    &emsp;·&emsp;
+    <a href="include/dvm.h">C++ API</a>
+    &emsp;·&emsp;
+    <a href="https://arxiv.org/abs/2603.24239">Technical Reports</a>
+  </p>
+</div>
 
 ---
 
-#### 项目介绍
-DVM(Device Virtual Machine)是当前业界唯一的微秒级实时AI算子编译和执行框架，可以实现对深度神经网络中的手写或融合算子在运行时根据具体Shape做实时算子编译和执行。通过实时编译技术，使得DVM可以原生支持动态Shape、动态图等动态网络场景的高性能图算融合和算子执行。除此之外，DVM也可以用于静态Shape图算融合、自定义手写算子等其它传统算子执行优化场景。当前，DVM已应用于[MindSpore](https://gitcode.com/mindspore/mindspore)、[TorchNPU](https://gitcode.com/Ascend/pytorch)等多个下游AI框架，用于实现图模式或Eager模式的自动图算融合优化。对于大部分网络场景，都可获得较为显著的整网融合性能收益。
+<a id="项目介绍"></a>
 
-DVM支持Huawei Ascend NPU硬件，并覆盖c220、c310系列芯片架构。
+## Introduction
 
-#### 环境配置
-DVM支持在linux下进行编译执行，并依赖如下环境配置：
-+ Ascend NPU硬件： A2/A3/A5均可;
-+ CANN: 推荐8.5版本及以上；
-+ C++编译器：支持GCC和Clang，已验证GCC 7.3.0和Clang 18.1，其它就近版本理论可支持，未验证；
-+ python: 推荐3.7以上版本。需要包含numpy、pybind11包。
+DVM (Device Virtual Machine) is currently the industry's only framework for microsecond-scale real-time AI operator
+compilation and execution. It compiles and executes handwritten or fused operators in deep neural networks at runtime
+based on their concrete shapes. Through real-time compilation, DVM natively supports high-performance operator fusion
+and execution in dynamic scenarios, including dynamic shapes and dynamic graphs. DVM also supports conventional
+operator optimization scenarios, such as static-shape graph fusion and custom handwritten operators. DVM is currently
+used by downstream AI frameworks including [MindSpore](https://gitcode.com/mindspore/mindspore) and
+[TorchNPU](https://gitcode.com/Ascend/pytorch) for automatic operator fusion in graph and eager modes.
+For most model workloads, this fusion can deliver significant end-to-end performance gains.
+
+DVM supports Huawei Ascend NPU hardware, covering the c220 and c310 chip architectures, as well as NVIDIA GPUs.
+The GPU backend supports V100 and newer NVIDIA GPUs.
+
+---
+
+## Core Design
+
+- **Compilation for runtime shapes:** Generate operators using the shapes available at execution time, enabling
+  shape-specific optimization for dynamic workloads.
+- **Tile-level bytecode:** The host compiler translates operator graphs into tile-level bytecode, which the device
+  virtual machine interprets to execute the computation.
+- **Fusion across execution modes:** Support operator fusion for static graphs, dynamic shapes, and eager execution,
+  with vector and matrix computation.
+- **Python and C++ interfaces:** Express custom operators and fused computations through Python or C++, and integrate
+  DVM into the compilation and execution paths of downstream frameworks.
+
+See the [operator development guide](docs/tutorial.md) for the architecture and execution flow.
+
+---
+
+<a id="installation"></a>
+<a id="环境配置"></a>
+
+## 🛠️ Installation
+
+### Environment requirements
+
+The following requirements and build steps apply to the Ascend backend:
+
+| Component | Requirement |
+| --- | --- |
+| Operating system | Linux |
+| Hardware | Huawei Ascend A2, A3, or A5 |
+| Runtime | CANN 8.5 or later |
+| C++ compiler | C++17 support; tested with GCC 7.3.0 and Clang 18.1 |
+| Python | Python 3.7 or later, with dependencies from [requirements.txt](requirements.txt), including NumPy and pybind11 |
+
+<a id="编译执行"></a>
+
+### Build from source
+
+In an activated Python environment, clone the repository and install its Python dependencies:
+
+```bash
+git clone https://github.com/mindspore-ai/dvm.git
+cd dvm
+python -m pip install -r requirements.txt
+```
+
+Replace the CANN path below with your installation path, then configure and build DVM from the repository root:
+
+```bash
+source /path/to/ascend-toolkit/set_env.sh
+source env.sh
+make -j8
+python -c "import dvm; print(dvm.__file__)"
+```
+
+The build produces `libdvm.a` and `_dvm_py.so`, and copies the Python extension into `python/dvm/`.
+The printed import path should point to this checkout. To use Clang for host compilation:
+
+```bash
+CXX=clang++ make -j8
+```
+
+Development setup, CUDA backend build steps, and testing guidance are in the [Contribution Guide](CONTRIBUTING.md).
+
+---
+
+<a id="quick-start"></a>
+
+## 🚀 Quick Start
+
+### Run a Python example
+
+After building DVM, run the [addition example](examples/01_add.py) from the repository root.
+Set `DEVICE_ID` to an available device:
+
+```bash
+DEVICE_ID=0 python examples/01_add.py
+```
+
+### Use the DVM API
+
+The same example defines an addition kernel with `@dvm.kernel` and executes it on NumPy inputs:
+
+```python
+import numpy as np
+import dvm
 
 
-#### 编译执行
-1. CANN环境配置: DVM依赖于CANN，所以编译执行前需先完成CANN环境配置。
-   ```bash
-    source /<path_to_cann>/ascend_toolkit/set_env.sh
-   ```
-2. DVM环境配置:
-   ```bash
-   cd dvm
-   source env.sh
-   ```
-3. DVM编译: 生成DVM库(libdvm.a)以及pybind接口库(_dvm_py.so)。
-   ```bash
-   make -j32
-   ```
-   如果需要使用非g++编译器进行host代码编译，可以通过`CXX`环境变量进行指定，例如：
-   ```bash
-   CXX=clang++ make -j32
-   ```
-4. DVM执行：基于DVM接口实现算子计算逻辑的定义表达，然后进行下发执行。 DVM当前支持两种表达和执行方式：
-   + 使用python接口: 如 ```python examples/01_add.py```。 这种方式主要用于DVM功能验证或自定义算子表达；
-   + 使用C++接口: 需要用户程序包含libdvm.a, 并基于DVM的C++接口进行算子定义和执行。可参考示例: [cc example](examples/cc/README.md)。
+@dvm.kernel
+def my_add(k, x, y):
+    a = k.load(x, dvm.float32)
+    b = k.load(y, dvm.float32)
+    c = k.add(a, b)
+    d = k.store(c)
+    return d
 
 
-#### 贡献
-欢迎参与项目贡献。 您可以从多个方面参与项目贡献, 包括并不限于：
-+ 提交在您具体使用场景遇到的新需求或新问题(issue), 帮助我们尽快识别和解决问题，以扫除您在DVM使用过程中的任何障碍；
-+ 提交Bug修复, 帮助其他人遇到同样问题的人避免重复踩坑；
-+ 提交新特性支持。 但最好先提交issue进行方案讨论，避免拒绝合入或返工，浪费您的宝贵时间;
-+ 提交新方案或技术想法(issue), 参与社区讨论，让DVM未来更好满足不同场景需求;
-+ 提交对已有代码的优化改进。作为实时编译器，编译性能是至关重要的指标。如果您对其中一些关键路径代码有更好的优化思路或实现，我们也非常欢迎。
+x = np.full([32, 32], 0.1, np.float32)
+y = np.full([32, 32], 0.3, np.float32)
+z = my_add(x, y)
+print(z)
+```
 
-其它未尽事宜，请参考MindSpore贡献者Wiki。
+More examples cover [batch normalization](examples/02_batchnorm.py), [attention](examples/03_attention.py),
+and [matrix multiplication with post-fusion](examples/04_matmul_post_fusion.py).
 
+For C++ applications, include the DVM headers and link `libdvm.a` as shown in the [C++ example](examples/cc/README.md).
 
-#### 许可证
-[Apache License 2.0](https://gitcode.com/mindspore/dvm/blob/master/LICENSE)
+For graph-mode and eager-mode fusion in TorchNPU, follow the [integration guide](docs/pytorch.md).
 
-#### Special Interest Group(SIG)
+---
 
-如果您对DVM相关技术讨论感兴趣，请考虑加入AKG SIG群。
+<a id="documentation"></a>
 
-![AKG_SIG](docs/figures/AKG_QRCode.png)
+## 📖 Documentation
+
+- [Operator Development Guide](docs/tutorial.md) — Architecture, C++ API usage, and execution modes (Chinese)
+- [TorchNPU Integration](docs/pytorch.md) — Graph-mode fusion, eager fusion, and custom operators (Chinese)
+- [Development Notes](docs/development.md) — Operator restrictions and simulator debugging (Chinese)
+- [Examples](examples) — Python kernels and C++ integration
+- [C++ API](include/dvm.h) · [Python API](python/dvm/_dvm_py.pyi) — Interface definitions
+- [Contributing](CONTRIBUTING.md) — Development setup, testing, pull requests, and review
+- [Release Notes](RELEASE.md) — Version history
+
+---
+
+<a id="contributing"></a>
+<a id="贡献"></a>
+
+## 🤝 Join Us
+
+Issues and pull requests are welcome, including bug reports, documentation, tests, new operators, and compilation
+or execution optimizations. Start with the [Contribution Guide](CONTRIBUTING.md) for development setup, validation,
+and the review workflow. Discuss substantial features in an [issue](https://github.com/mindspore-ai/dvm/issues/new/choose)
+before implementation.
+
+<a id="akg-sig"></a>
+<a id="special-interest-groupsig"></a>
+
+### AKG SIG
+
+If you are interested in DVM's technical direction, scan the QR code below to join the AKG SIG group and discuss
+usage and development with the community.
+
+<img src="docs/figures/AKG_QRCode.png" alt="AKG SIG community QR code" width="220" />
+
+---
+
+<a id="technical-reports"></a>
+
+## 📄 Technical Reports
+
+- DVM: A Bytecode Virtual Machine Approach for Dynamic Tensor Computation [[paper](https://arxiv.org/abs/2603.24239)]
+
+---
+
+<a id="许可证"></a>
+
+## ⚖️ License
+
+[Apache 2.0 License](LICENSE)
