@@ -24,6 +24,9 @@
 #include "ops.h"
 #include "ops_c.h"
 #include "pass.h"
+#ifdef DVM_ARCH_GPU
+#include "vm_gpu.h"
+#endif
 
 namespace dvm {
 class MsprofHelper;
@@ -177,6 +180,13 @@ class VectorKernel : public VKernel {
   }
 
   uint32_t CompactBlockDim(uint64_t core_limit) {
+#ifdef DVM_ARCH_GPU
+    if (core_limit == g_system.CoreNum()) {
+      uint64_t bt = gpu::SelectBlockThread(objects_.size(), tile_num_, tile_size_, code_.shared_bytes_);
+      code_.threads_ = bt & 0xffffull;
+      return bt >> 32;
+    }
+#endif
     auto tile_per_block = (tile_num_ + core_limit - 1) / core_limit;
     return (tile_num_ + tile_per_block - 1) / tile_per_block;
   }

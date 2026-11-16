@@ -313,6 +313,19 @@ void ReorderStore(BasicBlock &block) {
 }
 
 void ReorderLoad(BasicBlock &block) {
+#ifdef DVM_ARCH_GPU
+  std::unordered_set<NDObject *> moved;
+  for (NDObject *op = block.Begin(); op != block.End(); op = block.Next(op)) {
+    if (!op->IsSimd()) {
+      continue;
+    }
+    op->ForInput([&block, &moved, op](NDObject *in) {
+      if (in->IsLoad() && moved.insert(in).second) {
+        block.Move(op, in);
+      }
+    });
+  }
+#else
   uint32_t idx = 0;
   std::unordered_map<NDObject *, std::pair<uint32_t, uint32_t>> user_idx;
   // Get order of Load by usage
@@ -339,6 +352,7 @@ void ReorderLoad(BasicBlock &block) {
   for (auto &load : loads) {
     block.Move(block.Begin(), load.first);
   }
+#endif
 }
 
 namespace {
@@ -913,7 +927,6 @@ class PassOptimizerGpu : public PassOptimizer {
     CompactPeakLiveness(bb);
     ReorderLoad(bb);
     ReorderStore(bb);
-    VectorDoubleBuffer(bb);
   }
 };
 PassOptimizer *CreateOptimizer(AiCoreArch arch) {

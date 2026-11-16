@@ -1101,8 +1101,8 @@ uint64_t ParallelKernel::CodeGen() {
       ws_size += CodeGenVE(k, visit, prog_data, code_size, ws_size);
       continue;
     }
-    code_.Combine(k->code_, 0);
     uint64_t block_num = k->CompactBlockDim(core_limit);
+    code_.Combine(k->code_, 0);
     auto prog = encoder.Append(Code::GenEntryV(k->tile_num_, block_num, code_size), code_size);
     encoder.AssignAiv(aiv.core_begin, block_num, prog);
     aiv.Submit(n, block_num);

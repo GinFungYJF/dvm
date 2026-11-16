@@ -137,8 +137,17 @@ struct VmParam {
   uint64_t code[4096 / sizeof(uint64_t)];
 };
 
-int InitVM(uint64_t local_mem_size);
-int LaunchVM(const VmParam &param, uint32_t block_dim, void *stream);
+constexpr uint64_t kGpuXbufReserved = 32;
+
+struct SysConfig {
+  uint64_t core_num;
+  uint64_t local_mem_size;
+  uint64_t default_threads;
+};
+
+int InitVM(int dev_id, SysConfig &conf);
+uint64_t SelectBlockThread(uint64_t op_num, uint64_t tile_num, uint64_t tile_size, uint32_t shared_bytes);
+int LaunchVM(const VmParam &param, uint32_t block_dim, uint32_t threads, uint32_t shared_bytes, void *stream);
 }  // namespace dvm::gpu
 
 #endif  // _DVM_VM_GPU_H_

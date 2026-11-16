@@ -295,7 +295,7 @@ int System::CodeLaunchGPU(const System &self, const Code *code, void *extern_ws,
   gpu::VmParam param{};
   if (code->data_size_ <= PARAM_TABLE_LIMIT) {
     std::memcpy(param.code, code->data_, code->data_size_);
-    return gpu::LaunchVM(param, code->block_dim_, stream);
+    return gpu::LaunchVM(param, code->block_dim_, code->threads_, code->shared_bytes_, stream);
   }
   EXCEPTION_IF(extern_ws == nullptr, "gpu external code requires workspace");
   auto ret = cudaMemcpyAsync(extern_ws, code->data_, code->data_size_, cudaMemcpyHostToDevice,
@@ -306,34 +306,38 @@ int System::CodeLaunchGPU(const System &self, const Code *code, void *extern_ws,
   auto host_head = reinterpret_cast<uint64_t *>(code->data_);
   param.code[0] = reinterpret_cast<uint64_t>(extern_ws);
   param.code[1] = host_head[1] | V_ENTRY_FLAG_EXTERN_CODE;
-  return gpu::LaunchVM(param, code->block_dim_, stream);
+  return gpu::LaunchVM(param, code->block_dim_, code->threads_, code->shared_bytes_, stream);
 }
 
-void System::GetSocConfig() {
-  int device_id = 0;
-  auto err = rt::GetDevice(&device_id);
-  EXCEPTION_IF(err != 0, "cudaGetDevice failed");
-  cudaDeviceProp prop;
-  err = static_cast<int>(cudaGetDeviceProperties(&prop, device_id));
-  EXCEPTION_IF(err != 0, "cudaGetDeviceProperties failed");
-  soc_name_ = kSocGpu;
-  arch_ = kAiCore_Gpu;
-  cube_core_num_ = static_cast<uint64_t>(prop.multiProcessorCount);
-  l2_size_ = static_cast<uint64_t>(prop.l2CacheSize);
-  l2_ddr_bandwidth_ratio_ = 5.0f;
-}
+void System::GetSocConfig() {}
 
 void System::DoInit() {
-  GetSocConfig();
-  event_num_ = 8;
-  vector_core_num_ = cube_core_num_;
-  l1_size_ = 512 * 1024;
-  cube_store_type_ = kCubeStoreUB;
-  bt_size_ = 4096;
-  ub_workspace_size_ = 256;
-  l0c_size_ = 256 * 1024;
-  local_mem_size_ = 256 * 1024;
-  l2_cache_line_size_ = 128;
+  int device_id = 0;
+  if (rt::GetDevice(&device_id) != 0) {
+    code_launch_ = CodeLaunchNone;
+    return;
+  }
+  inited_ = true;
+  soc_name_ = kSocGpu;
+  arch_ = kAiCore_Gpu;
+
+  gpu::SysConfig conf;
+  if (gpu::InitVM(device_id, conf) != 0) {
+    DvmException("configure gpu vm failed");
+  }
+  cube_core_num_ = conf.core_num;
+  vector_core_num_ = conf.core_num;
+  local_mem_size_ = conf.local_mem_size;
+  default_threads_ = conf.default_threads;
+
+  event_num_ = 0;
+  l1_size_ = 0;
+  bt_size_ = 0;
+  ub_workspace_size_ = 0;
+  l0c_size_ = 0;
+  l2_size_ = 0;
+  l2_cache_line_size_ = 0;
+  l2_ddr_bandwidth_ratio_ = 0;
 
   static uint64_t gpu_func_offset[V_ACCESS_NONE + V_NONE + V_VISIT_NONE];
   std::memset(gpu_func_offset, 0xff, sizeof(gpu_func_offset));
@@ -350,26 +354,6 @@ void System::DoInit() {
   g_simd_func_offset_ = simd_funcs;
   g_visit_func_offset_ = visit_funcs;
 
-  int device_id = 0;
-  if (rt::GetDevice(&device_id) != 0) {
-    code_launch_ = CodeLaunchNone;
-    return;
-  }
-  cudaDeviceProp prop;
-  auto err = cudaGetDeviceProperties(&prop, device_id);
-  EXCEPTION_IF(err != cudaSuccess, "cudaGetDeviceProperties failed");
-  cube_core_num_ = static_cast<uint64_t>(prop.multiProcessorCount);
-  constexpr uint64_t blocks_per_sm = 2;
-  vector_core_num_ = static_cast<uint64_t>(prop.multiProcessorCount) * blocks_per_sm;
-
-  uint64_t optin = static_cast<uint64_t>(prop.sharedMemPerBlockOptin) & ~0x3ffull;
-  uint64_t max_ub = optin > 256 * 1024 ? 256 * 1024 : optin;
-  local_mem_size_ = (max_ub / blocks_per_sm) & ~0x3ffull;
-  EXCEPTION_IF(local_mem_size_ <= ub_workspace_size_, "GPU local memory size is too small");
-  if (gpu::InitVM(local_mem_size_) != 0) {
-    DvmException("configure gpu vm failed");
-  }
-  inited_ = true;
   pass_opt_ = pass::CreateOptimizer(arch_);
   code_launch_ = CodeLaunchGPU;
 }

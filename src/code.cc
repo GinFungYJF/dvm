@@ -1104,6 +1104,12 @@ void DasBody(std::ostringstream &oss, uint8_t *bcode, uint64_t bcode_size, const
     oss << "\n";
     insn = insn + offset;
     oss << indent << "    {";
+#ifdef DVM_ARCH_GPU
+    oss << (pipe == V_PIPE_SIMD ? "simd" : pipe == V_PIPE_LOAD ? "load" : "store");
+    if (head & (0x1ul << V_HEAD_BAR_FLAG_OFFSET)) {
+      oss << ", bar(1)";
+    }
+#else
     if (pipe == V_PIPE_SIMD) {
       oss << "simd";
       if (head & (0x1ul << V_HEAD_BAR_FLAG_OFFSET)) {
@@ -1138,6 +1144,7 @@ void DasBody(std::ostringstream &oss, uint8_t *bcode, uint64_t bcode_size, const
         oss << ", store_simd_sync(set, " << int((head >> V_M_HEAD_SET_EVENT_OFFSET) & V_HEAD_EVENT_MASK) << ")";
       }
     }
+#endif
     oss << " }" << std::endl;
   }
 }
@@ -1148,11 +1155,16 @@ class DisAssembler {
   explicit DisAssembler(std::ostringstream &oss_) : oss(oss_) {}
 
   void Run(Code *code, const char *prefix) {
-    void *ffts = *reinterpret_cast<void **>(code->data_);
     uint64_t entry = *reinterpret_cast<uint64_t *>(code->data_ + sizeof(uint64_t));
     uint8_t *bcode = code->data_ + code->HeadSize();
     uint64_t bcode_size = code->data_size_ - code->HeadSize();
-    oss << "// target=" << code->target_ << ", block_dim=" << code->block_dim_ << ", ffts_addr=" << ffts << std::endl;
+    oss << "// target=" << code->target_ << ", block_dim=" << code->block_dim_;
+#ifdef DVM_ARCH_GPU
+    oss << ", threads=" << code->threads_ << ", shared_bytes=" << code->shared_bytes_ << std::endl;
+#else
+    void *ffts = *reinterpret_cast<void **>(code->data_);
+    oss << ", ffts_addr=" << ffts << std::endl;
+#endif
     oss << prefix << ".";
     auto ktype = entry & V_ENTRY_MASK_TYPE;
     if (ktype == V_ENTRY_TYPE_V) {
@@ -1515,6 +1527,7 @@ void Code::MoveCode(Code &other) {
   block_dim_ = other.block_dim_;
   target_ = other.target_;
   mem_size_ = other.mem_size_;
+  ArchMove(other);
 
   other.data_ = nullptr;
   other.data_size_ = 0;
@@ -1578,6 +1591,7 @@ void Code::Combine(const Code &code, uint64_t ws_base) {
   if (code.wrap_) {
     code.wrap_->CombineWrap(this, ws_base);
   }
+  ArchCombine(code);
 }
 
 void Code::BindOp(RelocAddr &op, const RelocAddr &target) {

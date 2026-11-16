@@ -182,7 +182,6 @@ def test_broadcast_s_int64_scalar_ref(shape):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('lead_dim', [1024, 511])
-@pytest.mark.gpu
 def test_broadcast_store_rank_1(lead_dim):
     t = Tester()
     a0 = np.random.normal(0, 1, [2, 1, lead_dim]).astype(np.float32)
@@ -200,7 +199,6 @@ def test_broadcast_store_rank_1(lead_dim):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('lead_dim', [1024, 511])
-@pytest.mark.gpu
 def test_broadcast_store_rank_2(lead_dim):
     t = Tester()
     a0 = np.random.normal(0, 1, [2, 1, 4 * lead_dim]).astype(np.float32)
@@ -219,7 +217,6 @@ def test_broadcast_store_rank_2(lead_dim):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('lead_dim', [1024, 511])
-@pytest.mark.gpu
 def test_broadcast_store_rank_3(lead_dim):
     t = Tester()
     a0 = np.random.normal(0, 1, [2, 1, 4, 1, lead_dim]).astype(np.float32)
@@ -239,7 +236,6 @@ def test_broadcast_store_rank_3(lead_dim):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('lead_dim', [1024, 511])
-@pytest.mark.gpu
 def test_broadcast_store_rank_4(lead_dim):
     t = Tester()
     a0 = np.random.normal(0, 1, [2, 1, 4, 1, 2 * lead_dim]).astype(np.float32)

@@ -193,15 +193,19 @@ struct XbufPool {
 };
 
 #ifdef DVM_ARCH_GPU
-constexpr uint64_t kGpuXbufReserved = 32;
 class CodeGenHelper {
  public:
+  static_assert(kObjectBulk < 64);
+  static constexpr uint64_t kThreadWiseMask = 1ull << kCast | 1ull << kUnary | 1ull << kBinary | 1ull << kBinaryS |
+                                              1ull << kCompare | 1ull << kCompareS | 1ull << kSelect | 1ull << kPower | 1ull << kBroadcastS;
+  static constexpr uint64_t kSyncMask = -1;
+
   CodeGenHelper(VectorKernel &kernel, uint32_t xbuf_size, uint32_t pool_size)
       : xbuf_size_(xbuf_size), free_xbuf_(pool_size), kernel_(kernel) {}
 
   uint8_t *Generate(uint8_t *code_begin, uint64_t code_reserve) {
     uint64_t *code_ptr = reinterpret_cast<uint64_t *>(code_begin);
-    static_xbuf_ = kGpuXbufReserved;
+    static_xbuf_ = gpu::kGpuXbufReserved;
     uint64_t lead_align = kernel_.LeadAlign();
     ASSERT(kernel_.comm_op_ == nullptr);
     for (auto op : kernel_.objects_) {
@@ -209,59 +213,96 @@ class CodeGenHelper {
       if (flags & OBJ_FLAG_DEAD) {
         continue;
       }
+      sync_mask_ = (kThreadWiseMask >> op->obj_id_) & 1 ? kThreadWiseMask : 0;
       if (!op->IsStore()) {
-        op->xbuf_ = AllocXBuf();
+        op->xbuf_ = AllocXBuf(op);
         if (flags & (OBJ_FLAG_WORKSPACE | OBJ_FLAG_XHS)) {
           auto flex = static_cast<FlexOp *>(op);
           if (flex->ws_num_ > 0) {
             ASSERT(flex->ws_num_ <= 2);
-            flex->wss_[0] = AllocXBuf();
+            flex->wss_[0] = AllocXBuf(flex);
             if (flex->ws_num_ > 1) {
-              flex->wss_[1] = AllocXBuf();
-              FreeXBuf(flex->wss_[1]);
+              flex->wss_[1] = AllocXBuf(flex);
+              FreeXBuf(flex->wss_[1], flex, flex);
             }
-            FreeXBuf(flex->wss_[0]);
+            FreeXBuf(flex->wss_[0], flex, flex);
           }
           if (auto xhs = flex->xhs_; xhs && xhs->free_mask) {
             for (int i = 0; i < xhs->in_num; ++i) {
               if (xhs->free_mask & (1u << i)) {
-                FreeXBuf(xhs->data[i]->xbuf_);
+                auto def = xhs->data[i];
+                FreeXBuf(def->xbuf_, def, flex);
               }
             }
           }
         }
       }
       if (flags & OBJ_FLAG_FREE_LHS) {
-        FreeXBuf(op->lhs_->xbuf_);
+        FreeXBuf(op->lhs_->xbuf_, op->lhs_, op);
       }
       if (flags & OBJ_FLAG_FREE_RHS) {
-        FreeXBuf(op->rhs_->xbuf_);
+        FreeXBuf(op->rhs_->xbuf_, op->rhs_, op);
       }
       op->tail_insn_ = op->insn_ = code_ptr;
       if (auto ndd = op->Ndd()) {
         ndd->UpdateStride(lead_align);
       }
       code_ptr += op->Emit(kernel_);
+      SyncThread(op);
     }
     *code_ptr++ = 0;
+    kernel_.code_.threads_ = g_system.default_threads_;
+    kernel_.code_.shared_bytes_ = RoundUp<uint32_t>(static_xbuf_, 256);
     return reinterpret_cast<uint8_t *>(code_ptr);
   }
 
  private:
-  uint64_t AllocXBuf() {
+  bool NeedSync(NDObject *op) { return op->index_ >= last_sync_index_ && !((sync_mask_ >> op->obj_id_) & 1); }
+  void SyncThread(NDObject *op) {
+    bool sync = sync_mask_ == kSyncMask;
+    if (!sync) {
+      if (auto lhs = op->lhs_; lhs && !(sync = NeedSync(lhs))) {
+        if (auto rhs = op->rhs_; rhs && !(sync = NeedSync(rhs))) {
+          if (op->flags_ & OBJ_FLAG_XHS) {
+            auto xhs = static_cast<FlexOp *>(op)->xhs_;
+            for (int i = 0; i < xhs->in_num; ++i) {
+              if (sync = NeedSync(xhs->data[i]); sync) {
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+    if (sync) {
+      *(op->insn_) |= 0x1ul << V_HEAD_BAR_FLAG_OFFSET;
+      last_sync_index_ = op->index_;
+    }
+  }
+  static constexpr uint64_t kItemSizeMask = 0xfull;
+  uint64_t AllocXBuf(NDObject *op) {
     if (!free_xbuf_.Empty()) {
       auto &node = free_xbuf_.Pop();
-      return node.first;
+      if (sync_mask_ != kSyncMask &&
+          (NeedSync(node.second) || ITEM_SIZE[op->type_id_] != (node.first & kItemSizeMask))) {
+        sync_mask_ = kSyncMask;
+      }
+      return node.first & ~kItemSizeMask;
     }
     ASSERT(static_xbuf_ + xbuf_size_ <= kernel_.local_mem_size_);
     uint64_t xbuf = static_xbuf_;
     static_xbuf_ += xbuf_size_;
     return xbuf;
   }
-  void FreeXBuf(uint64_t xbuf) { free_xbuf_.Push(xbuf, nullptr); }
+  void FreeXBuf(uint64_t xbuf, NDObject *def, NDObject *user) {
+    ASSERT((xbuf & kItemSizeMask) == 0);
+    free_xbuf_.Push(xbuf | ITEM_SIZE[def->type_id_], user);
+  }
 
   uint64_t static_xbuf_;
   uint32_t xbuf_size_;
+  int last_sync_index_{0};
+  uint64_t sync_mask_;
   XbufPool free_xbuf_;
   VectorKernel &kernel_;
 };
@@ -1431,7 +1472,7 @@ int64_t VectorKernel::Analyze() {
 
 int64_t VectorKernel::TileSizeLimit(int64_t live_peak) {
 #ifdef DVM_ARCH_GPU
-  const int64_t xbuf_mem_size = static_cast<int64_t>(local_mem_size_) - kGpuXbufReserved;
+  const int64_t xbuf_mem_size = static_cast<int64_t>(local_mem_size_) - gpu::kGpuXbufReserved;
   int64_t peak_size = ITEM_SIZE[max_type_] * live_peak;
   return xbuf_mem_size / peak_size;
 #else
@@ -2003,8 +2044,8 @@ uint64_t VKernelS::CodeGen() {
       return ret;
     }
   }
-  uint64_t core_limit = g_system.CoreNum();
   int64_t live_peak = Analyze();
+  uint64_t core_limit = g_system.CoreNum();
   int64_t tile_size_limit = TileSizeLimit(live_peak);
   if (likely(tiles_.empty())) {
     TileUpdate update;

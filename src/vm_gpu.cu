@@ -28,37 +28,19 @@
 namespace dvm::gpu {
 namespace {
 
-constexpr uint64_t kGpuThreads = 256;
-constexpr uint64_t kInvalidTile = ~0ull;
-constexpr uint64_t kTileStride = (1ull << 32) - (1ull << 4);
+constexpr uint32_t kInvalidTile = 0xffffffffu;
 
-uint64_t g_local_mem_size = 0;
-
-// Tile format (kept in sync with src/vm_aiv.h):
-//  tile_idx(32) << 32 | tile_count(28) << 4 | skip_stride(1) << 3 |
-//  tail_flag(1) << 2 | end_flag(1) << 1 | not_begin_flag(1)
-#define GPU_TILE_N_BEGIN_FLAG_OFFSET 0
-#define GPU_TILE_END_FLAG_OFFSET 1
-#define GPU_TILE_TAIL_FLAG_OFFSET 2
-#define GPU_TILE_SKIP_FLAG_OFFSET 3
-#define GPU_TILE_COUNT_OFFSET 4
-#define GPU_TILE_CUR_IDX_OFFSET 32
-#define GPU_TILE_COUNT_BITS 28
-
-__device__ __forceinline__ uint64_t TileIdx(uint64_t tile) { return tile >> GPU_TILE_CUR_IDX_OFFSET; }
-__device__ __forceinline__ bool IsLastTile(uint64_t tile) { return (tile & 6ull) == 6ull; }
-
-__device__ __forceinline__ uint64_t AlignUp32(uint64_t x) { return (x + 31ull) & ~31ull; }
+__device__ __forceinline__ uint32_t AlignUp32(uint32_t x) { return (x + 31u) & ~31u; }
 
 enum GpuRoundMode { kGpuRoundCacheLoad, kGpuRoundCacheStore, kGpuRoundCacheNone };
 
 // Kept in sync with RoundUpTileIdx() in src/vm_aiv.h.
 template <GpuRoundMode mode>
-__device__ __forceinline__ uint64_t RoundUpTileIdxGpu(uint64_t tile, uint64_t tile_idx, uint64_t round_rank,
+__device__ __forceinline__ uint32_t RoundUpTileIdxGpu(uint32_t tile_idx, uint32_t round_rank,
                                                       const uint64_t *rounds) {
   if (round_rank == 1) {
-    uint64_t r1 = rounds[0];
-    uint64_t r_tile_idx = tile_idx / r1;
+    uint32_t r1 = static_cast<uint32_t>(rounds[0]);
+    uint32_t r_tile_idx = tile_idx / r1;
     if (mode == kGpuRoundCacheLoad) {
       return r_tile_idx;
     } else if (mode == kGpuRoundCacheStore) {
@@ -66,24 +48,24 @@ __device__ __forceinline__ uint64_t RoundUpTileIdxGpu(uint64_t tile, uint64_t ti
     }
     return r_tile_idx;
   } else if (round_rank == 2) {
-    uint64_t r2_r1 = rounds[0];
-    uint64_t r1 = r2_r1 & 0xffffffffull;
-    uint64_t r2 = r2_r1 >> 32;
-    uint64_t p1 = tile_idx / r1;
+    uint2 r2_r1 = *reinterpret_cast<const uint2 *>(rounds);
+    uint32_t r1 = r2_r1.x;
+    uint32_t r2 = r2_r1.y;
+    uint32_t p1 = tile_idx / r1;
     if (mode == kGpuRoundCacheStore) {
-      uint64_t align = p1 * r1;
+      uint32_t align = p1 * r1;
       return tile_idx < align + r2 ? p1 * r2 + tile_idx - align : kInvalidTile;
     }
     return p1 * r2 + tile_idx % r2;
   } else if (round_rank == 3) {
-    uint64_t r2_r1 = rounds[0];
-    uint64_t r1 = r2_r1 & 0xffffffffull;
-    uint64_t r2 = r2_r1 >> 32;
-    uint64_t r3 = rounds[1];
-    uint64_t p0 = tile_idx / r1;
-    uint64_t p1 = p0 * r2;
-    uint64_t p2 = tile_idx % (r2 * r3);
-    uint64_t p3 = p2 / r3;
+    uint2 r2_r1 = *reinterpret_cast<const uint2 *>(rounds);
+    uint32_t r1 = r2_r1.x;
+    uint32_t r2 = r2_r1.y;
+    uint32_t r3 = static_cast<uint32_t>(rounds[1]);
+    uint32_t p0 = tile_idx / r1;
+    uint32_t p1 = p0 * r2;
+    uint32_t p2 = tile_idx % (r2 * r3);
+    uint32_t p3 = p2 / r3;
     if (mode == kGpuRoundCacheLoad) {
       return p1 + p3;
     } else if (mode == kGpuRoundCacheStore) {
@@ -91,15 +73,15 @@ __device__ __forceinline__ uint64_t RoundUpTileIdxGpu(uint64_t tile, uint64_t ti
     }
     return p1 + p3;
   } else {
-    uint64_t r2_r1 = rounds[0];
-    uint64_t r1 = r2_r1 & 0xffffffffull;
-    uint64_t r2 = r2_r1 >> 32;
-    uint64_t r4_r3 = rounds[1];
-    uint64_t r3 = r4_r3 & 0xffffffffull;
-    uint64_t r4 = r4_r3 >> 32;
-    uint64_t p0 = tile_idx / r1;
-    uint64_t p1 = tile_idx % (r2 * r3);
-    uint64_t p2 = p1 / r3;
+    uint2 r2_r1 = *reinterpret_cast<const uint2 *>(rounds);
+    uint2 r4_r3 = *reinterpret_cast<const uint2 *>(rounds + 1);
+    uint32_t r1 = r2_r1.x;
+    uint32_t r2 = r2_r1.y;
+    uint32_t r3 = r4_r3.x;
+    uint32_t r4 = r4_r3.y;
+    uint32_t p0 = tile_idx / r1;
+    uint32_t p1 = tile_idx % (r2 * r3);
+    uint32_t p2 = p1 / r3;
     if (mode == kGpuRoundCacheStore) {
       return (tile_idx < p0 * r1 + r2 * r3) && (p1 < p2 * r3 + r4)
                ? (p0 * r2 + p2) * r4 + p1 - p2 * r3
@@ -113,20 +95,22 @@ struct VmCtx {
   uint8_t *ub;
 };
 
+__device__ __forceinline__ uint32_t NarrowU32(uint64_t v) { return static_cast<uint32_t>(v); }
+
 template <typename F>
-__device__ __forceinline__ void ParallelFor(uint64_t count, F f) {
-  for (uint64_t i = threadIdx.x; i < count; i += kGpuThreads) {
+__device__ __forceinline__ void ParallelFor(uint32_t count, F f) {
+  for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
     f(i);
   }
 }
 
 template <typename T>
-__device__ __forceinline__ T *UBPtr(VmCtx &ctx, uint64_t off) {
+__device__ __forceinline__ T *UBPtr(VmCtx &ctx, uint32_t off) {
   return reinterpret_cast<T *>(ctx.ub + off);
 }
 
 template <typename T>
-__device__ __forceinline__ const T *UBCPtr(const VmCtx &ctx, uint64_t off) {
+__device__ __forceinline__ const T *UBCPtr(const VmCtx &ctx, uint32_t off) {
   return reinterpret_cast<const T *>(ctx.ub + off);
 }
 
@@ -148,36 +132,36 @@ __device__ __forceinline__ uint16_t F32ToBF16(float v) {
 struct F32Tag {
   using S = float;
   using scalar_t = float;
-  __device__ __forceinline__ static float get(const S *p, uint64_t i) { return p[i]; }
-  __device__ __forceinline__ static void set(S *p, uint64_t i, float v) { p[i] = v; }
+  __device__ __forceinline__ static float get(const S *p, uint32_t i) { return p[i]; }
+  __device__ __forceinline__ static void set(S *p, uint32_t i, float v) { p[i] = v; }
 };
 
 struct F16Tag {
   using S = uint16_t;
   using scalar_t = float;
-  __device__ __forceinline__ static float get(const S *p, uint64_t i) { return F16ToF32(p[i]); }
-  __device__ __forceinline__ static void set(S *p, uint64_t i, float v) { p[i] = F32ToF16(v); }
+  __device__ __forceinline__ static float get(const S *p, uint32_t i) { return F16ToF32(p[i]); }
+  __device__ __forceinline__ static void set(S *p, uint32_t i, float v) { p[i] = F32ToF16(v); }
 };
 
 struct BF16Tag {
   using S = uint16_t;
   using scalar_t = float;
-  __device__ __forceinline__ static float get(const S *p, uint64_t i) { return BF16ToF32(p[i]); }
-  __device__ __forceinline__ static void set(S *p, uint64_t i, float v) { p[i] = F32ToBF16(v); }
+  __device__ __forceinline__ static float get(const S *p, uint32_t i) { return BF16ToF32(p[i]); }
+  __device__ __forceinline__ static void set(S *p, uint32_t i, float v) { p[i] = F32ToBF16(v); }
 };
 
 struct I32Tag {
   using S = int32_t;
   using scalar_t = int32_t;
-  __device__ __forceinline__ static int32_t get(const S *p, uint64_t i) { return p[i]; }
-  __device__ __forceinline__ static void set(S *p, uint64_t i, int32_t v) { p[i] = v; }
+  __device__ __forceinline__ static int32_t get(const S *p, uint32_t i) { return p[i]; }
+  __device__ __forceinline__ static void set(S *p, uint32_t i, int32_t v) { p[i] = v; }
 };
 
 struct BoolTag {
   using S = uint8_t;
   using scalar_t = uint8_t;
-  __device__ __forceinline__ static uint8_t get(const S *p, uint64_t i) { return p[i]; }
-  __device__ __forceinline__ static void set(S *p, uint64_t i, uint8_t v) { p[i] = v; }
+  __device__ __forceinline__ static uint8_t get(const S *p, uint32_t i) { return p[i]; }
+  __device__ __forceinline__ static void set(S *p, uint32_t i, uint8_t v) { p[i] = v; }
 };
 
 // Binary functors.  F16/BF16 tags expose float to the functor.
@@ -335,77 +319,78 @@ __device__ __forceinline__ bool CompareValue(T a, T b, int type) {
 }
 
 template <typename Tag, typename F>
-__device__ __forceinline__ void BinaryOp(VmCtx &ctx, uint64_t xd, uint64_t xn, uint64_t xm, uint64_t count, F f) {
+__device__ __forceinline__ void BinaryOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t xm, uint32_t count, F f) {
   using S = typename Tag::S;
   S *d = UBPtr<S>(ctx, xd);
   const S *n = UBCPtr<S>(ctx, xn);
   const S *m = UBCPtr<S>(ctx, xm);
-  ParallelFor(count, [&](uint64_t i) { Tag::set(d, i, f(Tag::get(n, i), Tag::get(m, i))); });
+  ParallelFor(count, [&](uint32_t i) { Tag::set(d, i, f(Tag::get(n, i), Tag::get(m, i))); });
 }
 
 template <typename Tag, typename F>
-__device__ __forceinline__ void BinarySOp(VmCtx &ctx, uint64_t xd, uint64_t xn, uint64_t count,
+__device__ __forceinline__ void BinarySOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t count,
                                           typename Tag::scalar_t scalar, F f) {
   using S = typename Tag::S;
   S *d = UBPtr<S>(ctx, xd);
   const S *n = UBCPtr<S>(ctx, xn);
-  ParallelFor(count, [&](uint64_t i) { Tag::set(d, i, f(Tag::get(n, i), scalar)); });
+  ParallelFor(count, [&](uint32_t i) { Tag::set(d, i, f(Tag::get(n, i), scalar)); });
 }
 
 template <typename Tag, typename F>
-__device__ __forceinline__ void UnaryOp(VmCtx &ctx, uint64_t xd, uint64_t xn, uint64_t count, F f) {
+__device__ __forceinline__ void UnaryOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t count, F f) {
   using S = typename Tag::S;
   S *d = UBPtr<S>(ctx, xd);
   const S *n = UBCPtr<S>(ctx, xn);
-  ParallelFor(count, [&](uint64_t i) { Tag::set(d, i, f(Tag::get(n, i))); });
+  ParallelFor(count, [&](uint32_t i) { Tag::set(d, i, f(Tag::get(n, i))); });
 }
 
 template <typename Tag>
-__device__ __forceinline__ void CmpOp(VmCtx &ctx, uint64_t xd, uint64_t xn, uint64_t xm, uint64_t count, int type) {
+__device__ __forceinline__ void CmpOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t xm, uint32_t count, int type) {
   using S = typename Tag::S;
   S *d = UBPtr<S>(ctx, xd);
   const S *n = UBCPtr<S>(ctx, xn);
   const S *m = UBCPtr<S>(ctx, xm);
-  ParallelFor(count, [&](uint64_t i) {
+  ParallelFor(count, [&](uint32_t i) {
     bool r = CompareValue(Tag::get(n, i), Tag::get(m, i), type);
     Tag::set(d, i, r ? 1 : 0);
   });
 }
 
 template <typename Tag>
-__device__ __forceinline__ void CmpSOp(VmCtx &ctx, uint64_t xd, uint64_t xn, uint64_t count,
+__device__ __forceinline__ void CmpSOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t count,
                                        typename Tag::scalar_t scalar, int type) {
   using S = typename Tag::S;
   S *d = UBPtr<S>(ctx, xd);
   const S *n = UBCPtr<S>(ctx, xn);
-  ParallelFor(count, [&](uint64_t i) {
+  ParallelFor(count, [&](uint32_t i) {
     bool r = CompareValue(Tag::get(n, i), scalar, type);
     Tag::set(d, i, r ? 1 : 0);
   });
 }
 
 template <typename Tag>
-__device__ __forceinline__ void SelectOp(VmCtx &ctx, const vSelect &op) {
+__device__ __forceinline__ void SelectOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t xm, uint32_t cond,
+                                         uint32_t count) {
   using S = typename Tag::S;
-  S *d = UBPtr<S>(ctx, op.xd);
-  const S *n = UBCPtr<S>(ctx, op.xn);
-  const S *m = UBCPtr<S>(ctx, op.xm);
-  const S *c = UBCPtr<S>(ctx, op.cond);
-  ParallelFor(op.count, [&](uint64_t i) { d[i] = Tag::get(c, i) != 0 ? n[i] : m[i]; });
+  S *d = UBPtr<S>(ctx, xd);
+  const S *n = UBCPtr<S>(ctx, xn);
+  const S *m = UBCPtr<S>(ctx, xm);
+  const S *c = UBCPtr<S>(ctx, cond);
+  ParallelFor(count, [&](uint32_t i) { d[i] = Tag::get(c, i) != 0 ? n[i] : m[i]; });
 }
 
-__device__ __forceinline__ void CopyBytesParallel(uint8_t *dst, const uint8_t *src, uint64_t bytes);
+__device__ __forceinline__ void CopyBytesParallel(uint8_t *dst, const uint8_t *src, uint32_t bytes);
 
 template <typename DstTag, typename SrcTag, typename Conv>
-__device__ __forceinline__ void CastOp(VmCtx &ctx, uint64_t xd, uint64_t xn, uint64_t count, Conv conv) {
+__device__ __forceinline__ void CastOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t count, Conv conv) {
   using DS = typename DstTag::S;
   using SS = typename SrcTag::S;
   DS *d = UBPtr<DS>(ctx, xd);
   const SS *s = UBCPtr<SS>(ctx, xn);
-  ParallelFor(count, [&](uint64_t i) { d[i] = conv(s[i]); });
+  ParallelFor(count, [&](uint32_t i) { d[i] = conv(s[i]); });
 }
 
-__device__ __forceinline__ void TrapUnsupported(uint64_t id, uint64_t head, const void *pc) {
+__device__ __forceinline__ void TrapUnsupported(uint32_t id, uint64_t head, const void *pc) {
   if (threadIdx.x == 0) {
     printf("DVM GPU: unsupported opcode %llu (head=0x%llx) at %p\n", static_cast<unsigned long long>(id),
            static_cast<unsigned long long>(head), pc);
@@ -413,18 +398,18 @@ __device__ __forceinline__ void TrapUnsupported(uint64_t id, uint64_t head, cons
   __trap();
 }
 
-__device__ __forceinline__ void CopyBytesSerial(uint8_t *dst, const uint8_t *src, uint64_t bytes) {
-  uint64_t off = 0;
-  auto align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
-  if ((align & 15ull) == 0) {
+__device__ __forceinline__ void CopyBytesSerial(uint8_t *dst, const uint8_t *src, uint32_t bytes) {
+  uint32_t off = 0;
+  uint32_t align = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src));
+  if ((align & 15u) == 0) {
     for (; off + 16 <= bytes; off += 16) {
       *reinterpret_cast<uint4 *>(dst + off) = *reinterpret_cast<const uint4 *>(src + off);
     }
-  } else if ((align & 7ull) == 0) {
+  } else if ((align & 7u) == 0) {
     for (; off + 8 <= bytes; off += 8) {
       *reinterpret_cast<uint64_t *>(dst + off) = *reinterpret_cast<const uint64_t *>(src + off);
     }
-  } else if ((align & 3ull) == 0) {
+  } else if ((align & 3u) == 0) {
     for (; off + 4 <= bytes; off += 4) {
       *reinterpret_cast<uint32_t *>(dst + off) = *reinterpret_cast<const uint32_t *>(src + off);
     }
@@ -434,46 +419,46 @@ __device__ __forceinline__ void CopyBytesSerial(uint8_t *dst, const uint8_t *src
   }
 }
 
-__device__ __forceinline__ void CopyBytesParallel(uint8_t *dst, const uint8_t *src, uint64_t bytes) {
+__device__ __forceinline__ void CopyBytesParallel(uint8_t *dst, const uint8_t *src, uint32_t bytes) {
   if (bytes == 0) {
     return;
   }
-  uint64_t off = 0;
-  auto align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
-  if ((align & 15ull) == 0) {
-    uint64_t count = bytes >> 4;
-    ParallelFor(count, [&](uint64_t i) {
+  uint32_t off = 0;
+  uint32_t align = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src));
+  if ((align & 15u) == 0) {
+    uint32_t count = bytes >> 4;
+    ParallelFor(count, [&](uint32_t i) {
       *reinterpret_cast<uint4 *>(dst + (i << 4)) = *reinterpret_cast<const uint4 *>(src + (i << 4));
     });
     off = count << 4;
-  } else if ((align & 7ull) == 0) {
-    uint64_t count = bytes >> 3;
-    ParallelFor(count, [&](uint64_t i) {
+  } else if ((align & 7u) == 0) {
+    uint32_t count = bytes >> 3;
+    ParallelFor(count, [&](uint32_t i) {
       *reinterpret_cast<uint64_t *>(dst + (i << 3)) = *reinterpret_cast<const uint64_t *>(src + (i << 3));
     });
     off = count << 3;
-  } else if ((align & 3ull) == 0) {
-    uint64_t count = bytes >> 2;
-    ParallelFor(count, [&](uint64_t i) {
+  } else if ((align & 3u) == 0) {
+    uint32_t count = bytes >> 2;
+    ParallelFor(count, [&](uint32_t i) {
       *reinterpret_cast<uint32_t *>(dst + (i << 2)) = *reinterpret_cast<const uint32_t *>(src + (i << 2));
     });
     off = count << 2;
   }
-  ParallelFor(bytes - off, [&](uint64_t i) { dst[off + i] = src[off + i]; });
+  ParallelFor(bytes - off, [&](uint32_t i) { dst[off + i] = src[off + i]; });
 }
 
-__device__ __forceinline__ void ZeroBytesSerial(uint8_t *dst, uint64_t bytes) {
-  uint64_t off = 0;
-  auto align = reinterpret_cast<uintptr_t>(dst);
-  if ((align & 15ull) == 0) {
+__device__ __forceinline__ void ZeroBytesSerial(uint8_t *dst, uint32_t bytes) {
+  uint32_t off = 0;
+  uint32_t align = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst));
+  if ((align & 15u) == 0) {
     for (; off + 16 <= bytes; off += 16) {
       *reinterpret_cast<uint4 *>(dst + off) = make_uint4(0, 0, 0, 0);
     }
-  } else if ((align & 7ull) == 0) {
+  } else if ((align & 7u) == 0) {
     for (; off + 8 <= bytes; off += 8) {
       *reinterpret_cast<uint64_t *>(dst + off) = 0;
     }
-  } else if ((align & 3ull) == 0) {
+  } else if ((align & 3u) == 0) {
     for (; off + 4 <= bytes; off += 4) {
       *reinterpret_cast<uint32_t *>(dst + off) = 0;
     }
@@ -483,30 +468,30 @@ __device__ __forceinline__ void ZeroBytesSerial(uint8_t *dst, uint64_t bytes) {
   }
 }
 
-__device__ __forceinline__ void ZeroBytesParallel(uint8_t *dst, uint64_t bytes) {
+__device__ __forceinline__ void ZeroBytesParallel(uint8_t *dst, uint32_t bytes) {
   if (bytes == 0) {
     return;
   }
-  uint64_t off = 0;
-  auto align = reinterpret_cast<uintptr_t>(dst);
-  if ((align & 15ull) == 0) {
-    uint64_t count = bytes >> 4;
-    ParallelFor(count, [&](uint64_t i) { *reinterpret_cast<uint4 *>(dst + (i << 4)) = make_uint4(0, 0, 0, 0); });
+  uint32_t off = 0;
+  uint32_t align = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst));
+  if ((align & 15u) == 0) {
+    uint32_t count = bytes >> 4;
+    ParallelFor(count, [&](uint32_t i) { *reinterpret_cast<uint4 *>(dst + (i << 4)) = make_uint4(0, 0, 0, 0); });
     off = count << 4;
-  } else if ((align & 7ull) == 0) {
-    uint64_t count = bytes >> 3;
-    ParallelFor(count, [&](uint64_t i) { *reinterpret_cast<uint64_t *>(dst + (i << 3)) = 0; });
+  } else if ((align & 7u) == 0) {
+    uint32_t count = bytes >> 3;
+    ParallelFor(count, [&](uint32_t i) { *reinterpret_cast<uint64_t *>(dst + (i << 3)) = 0; });
     off = count << 3;
-  } else if ((align & 3ull) == 0) {
-    uint64_t count = bytes >> 2;
-    ParallelFor(count, [&](uint64_t i) { *reinterpret_cast<uint32_t *>(dst + (i << 2)) = 0; });
+  } else if ((align & 3u) == 0) {
+    uint32_t count = bytes >> 2;
+    ParallelFor(count, [&](uint32_t i) { *reinterpret_cast<uint32_t *>(dst + (i << 2)) = 0; });
     off = count << 2;
   }
-  ParallelFor(bytes - off, [&](uint64_t i) { dst[off + i] = 0; });
+  ParallelFor(bytes - off, [&](uint32_t i) { dst[off + i] = 0; });
 }
 
-__device__ __forceinline__ void CopyRows(uint8_t *dst, const uint8_t *src, uint64_t n, uint64_t len,
-                                         uint64_t src_stride, uint64_t dst_stride) {
+__device__ __forceinline__ void CopyRows(uint8_t *dst, const uint8_t *src, uint32_t n, uint32_t len,
+                                         uint32_t src_stride, uint32_t dst_stride) {
   if (n == 0 || len == 0) {
     return;
   }
@@ -514,18 +499,18 @@ __device__ __forceinline__ void CopyRows(uint8_t *dst, const uint8_t *src, uint6
     CopyBytesParallel(dst, src, n * len);
     return;
   }
-  if (n >= kGpuThreads && len <= 16 * kGpuThreads) {
-    ParallelFor(n, [&](uint64_t row) {
+  if (n >= blockDim.x && len <= 16 * blockDim.x) {
+    ParallelFor(n, [&](uint32_t row) {
       CopyBytesSerial(dst + row * dst_stride, src + row * src_stride, len);
     });
     return;
   }
-  for (uint64_t row = 0; row < n; ++row) {
+  for (uint32_t row = 0; row < n; ++row) {
     CopyBytesParallel(dst + row * dst_stride, src + row * src_stride, len);
   }
 }
 
-__device__ __forceinline__ void ZeroRows(uint8_t *dst, uint64_t n, uint64_t len, uint64_t dst_stride) {
+__device__ __forceinline__ void ZeroRows(uint8_t *dst, uint32_t n, uint32_t len, uint32_t dst_stride) {
   if (n == 0 || len == 0) {
     return;
   }
@@ -533,199 +518,213 @@ __device__ __forceinline__ void ZeroRows(uint8_t *dst, uint64_t n, uint64_t len,
     ZeroBytesParallel(dst, n * len);
     return;
   }
-  if (n >= kGpuThreads && len <= 16 * kGpuThreads) {
-    ParallelFor(n, [&](uint64_t row) { ZeroBytesSerial(dst + row * dst_stride, len); });
+  if (n >= blockDim.x && len <= 16 * blockDim.x) {
+    ParallelFor(n, [&](uint32_t row) { ZeroBytesSerial(dst + row * dst_stride, len); });
     return;
   }
-  for (uint64_t row = 0; row < n; ++row) {
+  for (uint32_t row = 0; row < n; ++row) {
     ZeroBytesParallel(dst + row * dst_stride, len);
   }
 }
 
-__device__ __forceinline__ void CopyGmToUb(VmCtx &ctx, uint64_t xd, const uint8_t *src, uint64_t n, uint64_t len,
-                                           uint64_t src_gap, uint64_t dst_gap32) {
+__device__ __forceinline__ void CopyGmToUb(VmCtx &ctx, uint32_t xd, const uint8_t *src, uint32_t n, uint32_t len,
+                                           uint32_t src_gap, uint32_t dst_gap32) {
   if (n == 0 || len == 0) {
     return;
   }
   uint8_t *dst = ctx.ub + xd;
-  uint64_t dst_row = AlignUp32(len) + (dst_gap32 << 5);
-  auto align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
-  if (n == 1 && (align & 15ull) == 0) {
-    uint64_t count = len >> 4;
-    ParallelFor(count, [&](uint64_t i) {
+  uint32_t dst_row = AlignUp32(len) + (dst_gap32 << 5);
+  uint32_t align = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src));
+  if (n == 1 && (align & 15u) == 0) {
+    uint32_t count = len >> 4;
+    ParallelFor(count, [&](uint32_t i) {
       uint4 v = __ldg(reinterpret_cast<const uint4 *>(src + (i << 4)));
       *reinterpret_cast<uint4 *>(dst + (i << 4)) = v;
     });
-    uint64_t off = count << 4;
+    uint32_t off = count << 4;
     if (off < len) {
       CopyBytesSerial(dst + off, src + off, len - off);
     }
   } else {
     CopyRows(dst, src, n, len, len + src_gap, dst_row);
   }
-  uint64_t pad = AlignUp32(len) - len;
+  uint32_t pad = AlignUp32(len) - len;
   if (pad != 0) {
     ZeroRows(dst + len, n, pad, dst_row);
   }
 }
 
-__device__ __forceinline__ void CopyUbToGm(VmCtx &ctx, uint8_t *dst, uint64_t xn, uint64_t n, uint64_t len,
-                                           uint64_t src_gap32, uint64_t dst_gap) {
+__device__ __forceinline__ void CopyUbToGm(VmCtx &ctx, uint8_t *dst, uint32_t xn, uint32_t n, uint32_t len,
+                                           uint32_t src_gap32, uint32_t dst_gap) {
   if (n == 0 || len == 0) {
     return;
   }
   const uint8_t *src = ctx.ub + xn;
-  uint64_t src_row = AlignUp32(len) + (src_gap32 << 5);
-  uint64_t dst_row = len + dst_gap;
+  uint32_t src_row = AlignUp32(len) + (src_gap32 << 5);
+  uint32_t dst_row = len + dst_gap;
   CopyRows(dst, src, n, len, src_row, dst_row);
 }
 
 template <typename T>
-__device__ __forceinline__ void BroadcastS(VmCtx &ctx, uint64_t xd, uint64_t count, T scalar) {
+__device__ __forceinline__ void BroadcastS(VmCtx &ctx, uint32_t xd, uint32_t count, T scalar) {
   T *d = UBPtr<T>(ctx, xd);
-  ParallelFor(count, [&](uint64_t i) { d[i] = scalar; });
+  ParallelFor(count, [&](uint32_t i) { d[i] = scalar; });
 }
 
 template <typename T>
-__device__ __forceinline__ void FillSerial(T *d, uint64_t count, T value) {
-  for (uint64_t i = 0; i < count; ++i) {
+__device__ __forceinline__ void FillSerial(T *d, uint32_t count, T value) {
+  for (uint32_t i = 0; i < count; ++i) {
     d[i] = value;
   }
 }
 
 template <typename T>
-__device__ __forceinline__ void BroadcastX(VmCtx &ctx, const vBroadcastX &op) {
-  T *d = UBPtr<T>(ctx, op.xd);
-  const T *s = UBCPtr<T>(ctx, op.xn);
-  uint64_t src_stride = op.lead_num + op.lead_pad;
-  uint64_t dst_elems = op.iter_num * op.lead_num * op.count;
+__device__ __forceinline__ void BroadcastX(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t count,
+                                           uint32_t lead_num, uint32_t iter_num, uint32_t lead_pad) {
+  T *d = UBPtr<T>(ctx, xd);
+  const T *s = UBCPtr<T>(ctx, xn);
+  uint32_t src_stride = lead_num + lead_pad;
+  uint32_t dst_elems = iter_num * lead_num * count;
   if (dst_elems == 0) {
     return;
   }
-  uint64_t groups = op.iter_num * op.lead_num;
-  if (op.count >= kGpuThreads) {
-    for (uint64_t i = 0; i < op.iter_num; ++i) {
+  uint32_t groups = iter_num * lead_num;
+  if (count >= blockDim.x) {
+    for (uint32_t i = 0; i < iter_num; ++i) {
       const T *src_row = s + i * src_stride;
-      T *dst_row = d + i * op.lead_num * op.count;
-      for (uint64_t j = 0; j < op.lead_num; ++j) {
-        T *dst = dst_row + j * op.count;
+      T *dst_row = d + i * lead_num * count;
+      for (uint32_t j = 0; j < lead_num; ++j) {
+        T *dst = dst_row + j * count;
         T value = src_row[j];
-        ParallelFor(op.count, [&](uint64_t k) { dst[k] = value; });
+        ParallelFor(count, [&](uint32_t k) { dst[k] = value; });
       }
     }
-  } else if (groups >= kGpuThreads) {
-    ParallelFor(groups, [&](uint64_t g) {
-      uint64_t i = g / op.lead_num;
-      uint64_t j = g - i * op.lead_num;
-      FillSerial(d + (i * op.lead_num + j) * op.count, op.count, s[i * src_stride + j]);
+  } else if (groups >= blockDim.x) {
+    ParallelFor(groups, [&](uint32_t g) {
+      uint32_t i = g / lead_num;
+      uint32_t j = g - i * lead_num;
+      FillSerial(d + (i * lead_num + j) * count, count, s[i * src_stride + j]);
     });
   } else {
-    uint64_t row = op.lead_num * op.count;
-    ParallelFor(dst_elems, [&](uint64_t idx) {
-      uint64_t i = idx / row;
-      uint64_t rem = idx - i * row;
-      uint64_t j = rem / op.count;
+    uint32_t row = lead_num * count;
+    ParallelFor(dst_elems, [&](uint32_t idx) {
+      uint32_t i = idx / row;
+      uint32_t rem = idx - i * row;
+      uint32_t j = rem / count;
       d[idx] = s[i * src_stride + j];
     });
   }
 }
 
-__device__ __forceinline__ void BroadcastY(VmCtx &ctx, const vBroadcastY &op) {
-  uint64_t block = op.dup_stride * 32;
-  uint64_t dst_bytes = op.iter_num * op.dup_num * block;
+__device__ __forceinline__ void BroadcastY(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t iter_num,
+                                           uint32_t dup_num, uint32_t dup_stride) {
+  uint32_t block = dup_stride * 32;
+  uint32_t dst_bytes = iter_num * dup_num * block;
   if (dst_bytes == 0) {
     return;
   }
-  uint8_t *d = ctx.ub + op.xd;
-  const uint8_t *s = ctx.ub + op.xn;
-  uint64_t per_iter = op.dup_num * block;
-  uint64_t groups = op.iter_num * op.dup_num;
-  if (block >= kGpuThreads) {
-    for (uint64_t i = 0; i < op.iter_num; ++i) {
+  uint8_t *d = ctx.ub + xd;
+  const uint8_t *s = ctx.ub + xn;
+  uint32_t per_iter = dup_num * block;
+  uint32_t groups = iter_num * dup_num;
+  if (block >= blockDim.x) {
+    for (uint32_t i = 0; i < iter_num; ++i) {
       const uint8_t *src_row = s + i * block;
       uint8_t *dst_row = d + i * per_iter;
-      for (uint64_t j = 0; j < op.dup_num; ++j) {
+      for (uint32_t j = 0; j < dup_num; ++j) {
         CopyBytesParallel(dst_row + j * block, src_row, block);
       }
     }
-  } else if (groups >= kGpuThreads) {
-    ParallelFor(groups, [&](uint64_t g) {
-      uint64_t i = g / op.dup_num;
-      uint64_t j = g - i * op.dup_num;
+  } else if (groups >= blockDim.x) {
+    ParallelFor(groups, [&](uint32_t g) {
+      uint32_t i = g / dup_num;
+      uint32_t j = g - i * dup_num;
       CopyBytesSerial(d + i * per_iter + j * block, s + i * block, block);
     });
   } else {
-    for (uint64_t i = 0; i < op.iter_num; ++i) {
+    for (uint32_t i = 0; i < iter_num; ++i) {
       const uint8_t *src_row = s + i * block;
       uint8_t *dst_row = d + i * per_iter;
-      for (uint64_t j = 0; j < op.dup_num; ++j) {
+      for (uint32_t j = 0; j < dup_num; ++j) {
         CopyBytesParallel(dst_row + j * block, src_row, block);
       }
     }
   }
 }
 
-__device__ __forceinline__ void CopyOp(VmCtx &ctx, const vCopy &op) {
-  uint64_t bytes = op.lenburst * 32;
+__device__ __forceinline__ void CopyOp(VmCtx &ctx, uint32_t xd, uint32_t xn, uint32_t lenburst) {
+  uint32_t bytes = lenburst * 32;
   if (bytes == 0) {
     return;
   }
-  uint8_t *d = ctx.ub + op.xd;
-  uint8_t *s = ctx.ub + op.xn;
+  uint8_t *d = ctx.ub + xd;
+  uint8_t *s = ctx.ub + xn;
   CopyBytesParallel(d, s, bytes);
 }
 
-__device__ __forceinline__ void LoadOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint64_t tile) {
+__device__ __forceinline__ void LoadOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_last) {
   vLoad op;
   vLoad::Decode(pc, head, op);
-  uint64_t tile_idx = TileIdx(tile);
-  if (op.round_rank > 0) {
-    tile_idx = RoundUpTileIdxGpu<kGpuRoundCacheLoad>(tile, tile_idx, op.round_rank, pc + vLoad::ROUND_OFFSET);
+  const uint8_t *from = reinterpret_cast<const uint8_t *>(op.from);
+  uint32_t round_rank = NarrowU32(op.round_rank);
+  uint32_t body_iter = NarrowU32(op.body_iter);
+  uint32_t iter_size = NarrowU32(op.iter_size);
+  uint32_t tail_iter = NarrowU32(op.tail_iter);
+  uint32_t tile_stride = NarrowU32(op.tile_stride);
+  uint32_t xn = NarrowU32(op.xn);
+  uint32_t pad_size = NarrowU32(op.pad_size);
+  if (round_rank > 0) {
+    tile_idx = RoundUpTileIdxGpu<kGpuRoundCacheLoad>(tile_idx, round_rank, pc + vLoad::ROUND_OFFSET);
   }
-  uint64_t body_iter = op.body_iter;
-  uint64_t iter_size = op.iter_size;
-  if (IsLastTile(tile)) {
+  if (is_last) {
     if (body_iter == 1) {
-      iter_size = op.tail_iter;
+      iter_size = tail_iter;
     } else {
-      body_iter = op.tail_iter;
+      body_iter = tail_iter;
     }
   }
-  const uint8_t *src = reinterpret_cast<const uint8_t *>(op.from) + op.tile_stride * tile_idx;
-  CopyGmToUb(ctx, op.xn, src, body_iter, iter_size, 0, op.pad_size >> 5);
+  uint64_t tile_off = static_cast<uint64_t>(tile_stride) * tile_idx;
+  const uint8_t *src = from + tile_off;
+  CopyGmToUb(ctx, xn, src, body_iter, iter_size, 0, pad_size >> 5);
 }
 
-__device__ __forceinline__ void StoreOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint64_t tile) {
+__device__ __forceinline__ void StoreOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_last) {
   vStore op;
   vStore::Decode(pc, head, op);
-  uint64_t tile_idx = TileIdx(tile);
-  if (op.round_rank > 0) {
-    tile_idx = RoundUpTileIdxGpu<kGpuRoundCacheStore>(tile, tile_idx, op.round_rank, pc + vStore::ROUND_OFFSET);
+  uint8_t *to = reinterpret_cast<uint8_t *>(op.to);
+  uint32_t round_rank = NarrowU32(op.round_rank);
+  uint32_t iter_num = NarrowU32(op.iter_num);
+  uint32_t iter_size = NarrowU32(op.iter_size);
+  uint32_t iter_tail = NarrowU32(op.iter_tail);
+  uint32_t tile_stride = NarrowU32(op.tile_stride);
+  uint32_t xn = NarrowU32(op.xn);
+  uint32_t pad_size = NarrowU32(op.pad_size);
+  if (round_rank > 0) {
+    tile_idx = RoundUpTileIdxGpu<kGpuRoundCacheStore>(tile_idx, round_rank, pc + vStore::ROUND_OFFSET);
     if (tile_idx == kInvalidTile) {
       return;
     }
   }
-  uint64_t iter_num = op.iter_num;
-  uint64_t iter_size = op.iter_size;
-  if (IsLastTile(tile)) {
+  if (is_last) {
     if (iter_num == 1) {
-      iter_size = op.iter_tail;
+      iter_size = iter_tail;
     } else {
-      iter_num = op.iter_tail;
+      iter_num = iter_tail;
     }
   }
-  uint8_t *dst = reinterpret_cast<uint8_t *>(op.to) + op.tile_stride * tile_idx;
-  CopyUbToGm(ctx, dst, op.xn, iter_num, iter_size, op.pad_size >> 5, 0);
+  uint64_t tile_off = static_cast<uint64_t>(tile_stride) * tile_idx;
+  uint8_t *dst = to + tile_off;
+  CopyUbToGm(ctx, dst, xn, iter_num, iter_size, pad_size >> 5, 0);
 }
 
-__device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint64_t tile) {
+__device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_last) {
   uint32_t id = head >> V_HEAD_ID_OFFSET;
   switch (id) {
     case F_LOAD:
-      LoadOp(ctx, pc, head, tile);
+      LoadOp(ctx, pc, head, tile_idx, is_last);
       break;
     case F_STORE:
-      StoreOp(ctx, pc, head, tile);
+      StoreOp(ctx, pc, head, tile_idx, is_last);
       break;
     case F_LOAD_DUMMY:
       break;
@@ -734,571 +733,575 @@ __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, u
     case F_COPY: {
       vCopy op;
       vCopy::Decode(pc, head, op);
-      CopyOp(ctx, op);
+      CopyOp(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.lenburst));
       break;
     }
     case F_BROADCAST_S: {
       vBroadcastS op;
       vBroadcastS::Decode(pc, head, op);
-      BroadcastS<uint32_t>(ctx, op.xd, op.count, static_cast<uint32_t>(op.scalar));
+      BroadcastS<uint32_t>(ctx, NarrowU32(op.xd), NarrowU32(op.count), static_cast<uint32_t>(op.scalar));
       break;
     }
     case F_BROADCAST_S_B8: {
       vBroadcastS op;
       vBroadcastS::Decode(pc, head, op);
-      BroadcastS<uint8_t>(ctx, op.xd, op.count, static_cast<uint8_t>(op.scalar));
+      BroadcastS<uint8_t>(ctx, NarrowU32(op.xd), NarrowU32(op.count), static_cast<uint8_t>(op.scalar));
       break;
     }
     case F_BROADCAST_S_B16: {
       vBroadcastS op;
       vBroadcastS::Decode(pc, head, op);
-      BroadcastS<uint16_t>(ctx, op.xd, op.count, static_cast<uint16_t>(op.scalar));
+      BroadcastS<uint16_t>(ctx, NarrowU32(op.xd), NarrowU32(op.count), static_cast<uint16_t>(op.scalar));
       break;
     }
     case F_BROADCAST_X_B8: {
       vBroadcastX op;
       vBroadcastX::Decode(pc, head, op);
-      BroadcastX<uint8_t>(ctx, op);
+      BroadcastX<uint8_t>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count),
+                          NarrowU32(op.lead_num), NarrowU32(op.iter_num), NarrowU32(op.lead_pad));
       break;
     }
     case F_BROADCAST_X_B16: {
       vBroadcastX op;
       vBroadcastX::Decode(pc, head, op);
-      BroadcastX<uint16_t>(ctx, op);
+      BroadcastX<uint16_t>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count),
+                           NarrowU32(op.lead_num), NarrowU32(op.iter_num), NarrowU32(op.lead_pad));
       break;
     }
     case F_BROADCAST_X_B32: {
       vBroadcastX op;
       vBroadcastX::Decode(pc, head, op);
-      BroadcastX<uint32_t>(ctx, op);
+      BroadcastX<uint32_t>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count),
+                           NarrowU32(op.lead_num), NarrowU32(op.iter_num), NarrowU32(op.lead_pad));
       break;
     }
     case F_BROADCAST_Y: {
       vBroadcastY op;
       vBroadcastY::Decode(pc, head, op);
-      BroadcastY(ctx, op);
+      BroadcastY(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.iter_num),
+                  NarrowU32(op.dup_num), NarrowU32(op.dup_stride));
       break;
     }
     case F_CAST_FP32_TO_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<F16Tag, F32Tag>(ctx, op.xd, op.xn, op.count, CvtF32ToF16{});
+      CastOp<F16Tag, F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtF32ToF16{});
       break;
     }
     case F_CAST_FP32_TO_BF16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<BF16Tag, F32Tag>(ctx, op.xd, op.xn, op.count, CvtF32ToBF16{});
+      CastOp<BF16Tag, F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtF32ToBF16{});
       break;
     }
     case F_CAST_FP32_TO_INT32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<I32Tag, F32Tag>(ctx, op.xd, op.xn, op.count, CvtF32ToI32{});
+      CastOp<I32Tag, F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtF32ToI32{});
       break;
     }
     case F_CAST_FP16_TO_BOOL: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<BoolTag, F16Tag>(ctx, op.xd, op.xn, op.count, CvtF16ToBool{});
+      CastOp<BoolTag, F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtF16ToBool{});
       break;
     }
     case F_CAST_FP16_TO_FP32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<F32Tag, F16Tag>(ctx, op.xd, op.xn, op.count, CvtF16ToF32{});
+      CastOp<F32Tag, F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtF16ToF32{});
       break;
     }
     case F_CAST_FP16_TO_INT32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<I32Tag, F16Tag>(ctx, op.xd, op.xn, op.count, CvtF16ToI32{});
+      CastOp<I32Tag, F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtF16ToI32{});
       break;
     }
     case F_CAST_BF16_TO_FP32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<F32Tag, BF16Tag>(ctx, op.xd, op.xn, op.count, CvtBF16ToF32{});
+      CastOp<F32Tag, BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtBF16ToF32{});
       break;
     }
     case F_CAST_BF16_TO_INT32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<I32Tag, BF16Tag>(ctx, op.xd, op.xn, op.count, CvtBF16ToI32{});
+      CastOp<I32Tag, BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtBF16ToI32{});
       break;
     }
     case F_CAST_INT32_TO_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<F16Tag, I32Tag>(ctx, op.xd, op.xn, op.count, CvtI32ToF16{});
+      CastOp<F16Tag, I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtI32ToF16{});
       break;
     }
     case F_CAST_INT32_TO_FP32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<F32Tag, I32Tag>(ctx, op.xd, op.xn, op.count, CvtI32ToF32{});
+      CastOp<F32Tag, I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtI32ToF32{});
       break;
     }
     case F_CAST_BOOL_TO_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      CastOp<F16Tag, BoolTag>(ctx, op.xd, op.xn, op.count, CvtBoolToF16{});
+      CastOp<F16Tag, BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CvtBoolToF16{});
       break;
     }
     case F_SQRT: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, SqrtOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), SqrtOp{});
       break;
     }
     case F_SQRT_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F16Tag>(ctx, op.xd, op.xn, op.count, SqrtOp{});
+      UnaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), SqrtOp{});
       break;
     }
     case F_ABS: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, AbsFOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), AbsFOp{});
       break;
     }
     case F_ABS_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F16Tag>(ctx, op.xd, op.xn, op.count, AbsFOp{});
+      UnaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), AbsFOp{});
       break;
     }
     case F_ABS_INT32: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<I32Tag>(ctx, op.xd, op.xn, op.count, AbsIOp{});
+      UnaryOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), AbsIOp{});
       break;
     }
     case F_LOG: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, LogOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), LogOp{});
       break;
     }
     case F_LOG_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F16Tag>(ctx, op.xd, op.xn, op.count, LogOp{});
+      UnaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), LogOp{});
       break;
     }
     case F_EXP: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, ExpOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), ExpOp{});
       break;
     }
     case F_EXP_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F16Tag>(ctx, op.xd, op.xn, op.count, ExpOp{});
+      UnaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), ExpOp{});
       break;
     }
     case F_ROUND: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, RoundOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), RoundOp{});
       break;
     }
     case F_FLOOR: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, FloorOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), FloorOp{});
       break;
     }
     case F_CEIL: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, CeilOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), CeilOp{});
       break;
     }
     case F_TRUNC: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, TruncOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), TruncOp{});
       break;
     }
     case F_ISFINITE: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F32Tag>(ctx, op.xd, op.xn, op.count, IsFiniteOp{});
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), IsFiniteOp{});
       break;
     }
     case F_ISFINITE_FP16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<F16Tag>(ctx, op.xd, op.xn, op.count, IsFiniteOp{});
+      UnaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), IsFiniteOp{});
       break;
     }
     case F_ISFINITE_BF16: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<BF16Tag>(ctx, op.xd, op.xn, op.count, IsFiniteOp{});
+      UnaryOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), IsFiniteOp{});
       break;
     }
     case F_LOGICAL_NOT_BOOL: {
       vUnary op;
       vUnary::Decode(pc, head, op);
-      UnaryOp<BoolTag>(ctx, op.xd, op.xn, op.count, NotBoolOp{});
+      UnaryOp<BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), NotBoolOp{});
       break;
     }
     case F_ADDS: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<float>(pc), AddOp{});
+      BinarySOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<float>(pc), AddOp{});
       break;
     }
     case F_ADDS_FP16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), AddOp{});
+      BinarySOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), AddOp{});
       break;
     }
     case F_ADDS_BF16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<BF16Tag>(ctx, op.xd, op.xn, op.count, BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), AddOp{});
+      BinarySOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), AddOp{});
       break;
     }
     case F_ADDS_INT32: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<I32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<int32_t>(pc), AddOp{});
+      BinarySOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<int32_t>(pc), AddOp{});
       break;
     }
     case F_MULS: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<float>(pc), MulOp{});
+      BinarySOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<float>(pc), MulOp{});
       break;
     }
     case F_MULS_FP16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MulOp{});
+      BinarySOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MulOp{});
       break;
     }
     case F_MULS_BF16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<BF16Tag>(ctx, op.xd, op.xn, op.count, BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MulOp{});
+      BinarySOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MulOp{});
       break;
     }
     case F_MULS_INT32: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<I32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<int32_t>(pc), MulOp{});
+      BinarySOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<int32_t>(pc), MulOp{});
       break;
     }
     case F_DIVS: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<float>(pc), DivOp{});
+      BinarySOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<float>(pc), DivOp{});
       break;
     }
     case F_DIVS_FP16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), DivOp{});
+      BinarySOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), DivOp{});
       break;
     }
     case F_SDIV: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<float>(pc), DivLeftOp{});
+      BinarySOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<float>(pc), DivLeftOp{});
       break;
     }
     case F_SDIV_FP16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), DivLeftOp{});
+      BinarySOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), DivLeftOp{});
       break;
     }
     case F_MAXS: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<float>(pc), MaxOp{});
+      BinarySOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<float>(pc), MaxOp{});
       break;
     }
     case F_MAXS_FP16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MaxOp{});
+      BinarySOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MaxOp{});
       break;
     }
     case F_MAXS_BF16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<BF16Tag>(ctx, op.xd, op.xn, op.count, BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MaxOp{});
+      BinarySOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MaxOp{});
       break;
     }
     case F_MAXS_INT32: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<I32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<int32_t>(pc), MaxOp{});
+      BinarySOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<int32_t>(pc), MaxOp{});
       break;
     }
     case F_MINS: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<float>(pc), MinOp{});
+      BinarySOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<float>(pc), MinOp{});
       break;
     }
     case F_MINS_FP16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MinOp{});
+      BinarySOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MinOp{});
       break;
     }
     case F_MINS_BF16: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<BF16Tag>(ctx, op.xd, op.xn, op.count, BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MinOp{});
+      BinarySOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), BF16ToF32(vBinaryS::GetScalar<uint16_t>(pc)), MinOp{});
       break;
     }
     case F_MINS_INT32: {
       vBinaryS op;
       vBinaryS::Decode(pc, head, op);
-      BinarySOp<I32Tag>(ctx, op.xd, op.xn, op.count, vBinaryS::GetScalar<int32_t>(pc), MinOp{});
+      BinarySOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vBinaryS::GetScalar<int32_t>(pc), MinOp{});
       break;
     }
     case F_CMPS: {
       vCompareS op;
       vCompareS::Decode(pc, head, op);
-      CmpSOp<F32Tag>(ctx, op.xd, op.xn, op.count, vCompareS::GetScalar<float>(pc), op.type);
+      CmpSOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vCompareS::GetScalar<float>(pc), NarrowU32(op.type));
       break;
     }
     case F_CMPS_FP16: {
       vCompareS op;
       vCompareS::Decode(pc, head, op);
-      CmpSOp<F16Tag>(ctx, op.xd, op.xn, op.count, F16ToF32(vCompareS::GetScalar<uint16_t>(pc)), op.type);
+      CmpSOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), F16ToF32(vCompareS::GetScalar<uint16_t>(pc)), NarrowU32(op.type));
       break;
     }
     case F_CMPS_BF16: {
       vCompareS op;
       vCompareS::Decode(pc, head, op);
-      CmpSOp<BF16Tag>(ctx, op.xd, op.xn, op.count, BF16ToF32(vCompareS::GetScalar<uint16_t>(pc)), op.type);
+      CmpSOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), BF16ToF32(vCompareS::GetScalar<uint16_t>(pc)), NarrowU32(op.type));
       break;
     }
     case F_CMPS_INT32: {
       vCompareS op;
       vCompareS::Decode(pc, head, op);
-      CmpSOp<I32Tag>(ctx, op.xd, op.xn, op.count, vCompareS::GetScalar<int32_t>(pc), op.type);
+      CmpSOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vCompareS::GetScalar<int32_t>(pc), NarrowU32(op.type));
       break;
     }
     case F_CMPS_BOOL: {
       vCompareS op;
       vCompareS::Decode(pc, head, op);
-      CmpSOp<BoolTag>(ctx, op.xd, op.xn, op.count, vCompareS::GetScalar<uint8_t>(pc), op.type);
+      CmpSOp<BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), vCompareS::GetScalar<uint8_t>(pc), NarrowU32(op.type));
       break;
     }
     case F_ADD: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, AddOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), AddOp{});
       break;
     }
     case F_ADD_FP16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, AddOp{});
+      BinaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), AddOp{});
       break;
     }
     case F_ADD_BF16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BF16Tag>(ctx, op.xd, op.xn, op.xm, op.count, AddOp{});
+      BinaryOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), AddOp{});
       break;
     }
     case F_ADD_INT32: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<I32Tag>(ctx, op.xd, op.xn, op.xm, op.count, AddOp{});
+      BinaryOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), AddOp{});
       break;
     }
     case F_SUB: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, SubOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), SubOp{});
       break;
     }
     case F_SUB_FP16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, SubOp{});
+      BinaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), SubOp{});
       break;
     }
     case F_SUB_BF16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BF16Tag>(ctx, op.xd, op.xn, op.xm, op.count, SubOp{});
+      BinaryOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), SubOp{});
       break;
     }
     case F_SUB_INT32: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<I32Tag>(ctx, op.xd, op.xn, op.xm, op.count, SubOp{});
+      BinaryOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), SubOp{});
       break;
     }
     case F_MUL: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, MulOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MulOp{});
       break;
     }
     case F_MUL_FP16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, MulOp{});
+      BinaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MulOp{});
       break;
     }
     case F_MUL_BF16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BF16Tag>(ctx, op.xd, op.xn, op.xm, op.count, MulOp{});
+      BinaryOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MulOp{});
       break;
     }
     case F_MUL_INT32: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<I32Tag>(ctx, op.xd, op.xn, op.xm, op.count, MulOp{});
+      BinaryOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MulOp{});
       break;
     }
     case F_DIV: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, DivOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), DivOp{});
       break;
     }
     case F_DIV_FP16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, DivOp{});
+      BinaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), DivOp{});
       break;
     }
     case F_MIN: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, MinOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MinOp{});
       break;
     }
     case F_MIN_FP16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, MinOp{});
+      BinaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MinOp{});
       break;
     }
     case F_MIN_BF16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BF16Tag>(ctx, op.xd, op.xn, op.xm, op.count, MinOp{});
+      BinaryOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MinOp{});
       break;
     }
     case F_MIN_INT32: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<I32Tag>(ctx, op.xd, op.xn, op.xm, op.count, MinOp{});
+      BinaryOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MinOp{});
       break;
     }
     case F_MAX: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, MaxOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MaxOp{});
       break;
     }
     case F_MAX_FP16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, MaxOp{});
+      BinaryOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MaxOp{});
       break;
     }
     case F_MAX_BF16: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BF16Tag>(ctx, op.xd, op.xn, op.xm, op.count, MaxOp{});
+      BinaryOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MaxOp{});
       break;
     }
     case F_MAX_INT32: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<I32Tag>(ctx, op.xd, op.xn, op.xm, op.count, MaxOp{});
+      BinaryOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), MaxOp{});
       break;
     }
     case F_CMP: {
       vCompare op;
       vCompare::Decode(pc, head, op);
-      CmpOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, static_cast<int>(op.type));
+      CmpOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), static_cast<int>(NarrowU32(op.type)));
       break;
     }
     case F_CMP_FP16: {
       vCompare op;
       vCompare::Decode(pc, head, op);
-      CmpOp<F16Tag>(ctx, op.xd, op.xn, op.xm, op.count, static_cast<int>(op.type));
+      CmpOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), static_cast<int>(NarrowU32(op.type)));
       break;
     }
     case F_CMP_BF16: {
       vCompare op;
       vCompare::Decode(pc, head, op);
-      CmpOp<BF16Tag>(ctx, op.xd, op.xn, op.xm, op.count, static_cast<int>(op.type));
+      CmpOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), static_cast<int>(NarrowU32(op.type)));
       break;
     }
     case F_CMP_INT32: {
       vCompare op;
       vCompare::Decode(pc, head, op);
-      CmpOp<I32Tag>(ctx, op.xd, op.xn, op.xm, op.count, static_cast<int>(op.type));
+      CmpOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), static_cast<int>(NarrowU32(op.type)));
       break;
     }
     case F_CMP_BOOL: {
       vCompare op;
       vCompare::Decode(pc, head, op);
-      CmpOp<BoolTag>(ctx, op.xd, op.xn, op.xm, op.count, static_cast<int>(op.type));
+      CmpOp<BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), static_cast<int>(NarrowU32(op.type)));
       break;
     }
     case F_SEL: {
       vSelect op;
       vSelect::Decode(pc, head, op);
-      SelectOp<F32Tag>(ctx, op);
+      SelectOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.cond), NarrowU32(op.count));
       break;
     }
     case F_SEL_FP16: {
       vSelect op;
       vSelect::Decode(pc, head, op);
-      SelectOp<F16Tag>(ctx, op);
+      SelectOp<F16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.cond), NarrowU32(op.count));
       break;
     }
     case F_SEL_BF16: {
       vSelect op;
       vSelect::Decode(pc, head, op);
-      SelectOp<BF16Tag>(ctx, op);
+      SelectOp<BF16Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.cond), NarrowU32(op.count));
       break;
     }
     case F_SEL_INT32: {
       vSelect op;
       vSelect::Decode(pc, head, op);
-      SelectOp<I32Tag>(ctx, op);
+      SelectOp<I32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.cond), NarrowU32(op.count));
       break;
     }
     case F_POW: {
       vBinaryWS op;
       vBinaryWS::Decode(pc, head, op);
-      BinaryOp<F32Tag>(ctx, op.xd, op.xn, op.xm, op.count, PowOp{});
+      BinaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), PowOp{});
       break;
     }
     case F_LOGICAL_AND_BOOL: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BoolTag>(ctx, op.xd, op.xn, op.xm, op.count, AndOp{});
+      BinaryOp<BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), AndOp{});
       break;
     }
     case F_LOGICAL_OR_BOOL: {
       vBinary op;
       vBinary::Decode(pc, head, op);
-      BinaryOp<BoolTag>(ctx, op.xd, op.xn, op.xm, op.count, OrOp{});
+      BinaryOp<BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), OrOp{});
       break;
     }
     default:
@@ -1320,12 +1323,12 @@ __global__ void dvm_vm_gpu(__grid_constant__ const VmParam param) {
   ctx.ub = smem;
 
   uint8_t *base_body = reinterpret_cast<uint8_t *>(code + 2);
-  uint64_t bid = blockIdx.x;
-  uint64_t bnum = gridDim.x;
-  uint64_t ktype = entry & V_ENTRY_MASK_TYPE;
+  uint32_t bid = blockIdx.x;
+  uint32_t bnum = gridDim.x;
+  uint32_t ktype = static_cast<uint32_t>(entry & V_ENTRY_MASK_TYPE);
 
   if (ktype == V_ENTRY_TYPE_P) {
-    uint64_t lookup_offset = (entry >> V_ENTRY_P_AIV_LKUP_OFFSET) & V_ENTRY_P_LKUP_MASK;
+    uint32_t lookup_offset = static_cast<uint32_t>((entry >> V_ENTRY_P_AIV_LKUP_OFFSET) & V_ENTRY_P_LKUP_MASK);
     uint8_t prog_offset = base_body[lookup_offset + bid];
     if (prog_offset == V_ENTRY_P_LKUP_INVALID) {
       return;
@@ -1333,76 +1336,138 @@ __global__ void dvm_vm_gpu(__grid_constant__ const VmParam param) {
     const uint64_t *prog = reinterpret_cast<const uint64_t *>(base_body) + prog_offset;
     entry = prog[0];
     uint64_t data = prog[1];
-    uint64_t b_begin = data & 0xffffull;
-    uint64_t b_num = (data >> 16) & 0xffffull;
-    uint64_t body_offset = (data >> 32) & 0xffffull;
+    uint32_t b_begin = static_cast<uint32_t>(data & 0xffffu);
+    uint32_t b_num = static_cast<uint32_t>((data >> 16) & 0xffffu);
+    uint32_t body_offset = static_cast<uint32_t>((data >> 32) & 0xffffu);
     bid -= b_begin;
     bnum = b_num;
     base_body += body_offset;
-    ktype = entry & V_ENTRY_MASK_TYPE;
+    ktype = static_cast<uint32_t>(entry & V_ENTRY_MASK_TYPE);
   }
 
   uint64_t *body = reinterpret_cast<uint64_t *>(base_body);
-  uint64_t body_tile = (entry >> V_ENTRY_V_TILE_BODY_OFFSET) & ((1ull << V_ENTRY_V_TILE_BODY_BITS) - 1ull);
-  uint64_t tail_diff = (entry >> V_ENTRY_V_TILE_TAIL_OFFSET) & ((1ull << V_ENTRY_V_TILE_TAIL_BITS) - 1ull);
-  uint64_t count = body_tile;
-  uint64_t tile = (bid * body_tile) << GPU_TILE_CUR_IDX_OFFSET;
-  if (bid == bnum - 1) {
+  uint32_t body_tile =
+    static_cast<uint32_t>((entry >> V_ENTRY_V_TILE_BODY_OFFSET) & ((1ull << V_ENTRY_V_TILE_BODY_BITS) - 1ull));
+  uint32_t tail_diff =
+    static_cast<uint32_t>((entry >> V_ENTRY_V_TILE_TAIL_OFFSET) & ((1ull << V_ENTRY_V_TILE_TAIL_BITS) - 1ull));
+  uint32_t count = body_tile;
+  uint32_t tile_idx = bid * body_tile;
+  bool tail = (bid == bnum - 1);
+  if (tail) {
     count -= tail_diff;
-    tile |= 1ull << GPU_TILE_TAIL_FLAG_OFFSET;
   }
-  tile |= count << GPU_TILE_COUNT_OFFSET;
 
-  while (((tile >> GPU_TILE_COUNT_OFFSET) & ((1ull << GPU_TILE_COUNT_BITS) - 1ull)) != 0) {
-    uint64_t cur_count = (tile >> GPU_TILE_COUNT_OFFSET) & ((1ull << GPU_TILE_COUNT_BITS) - 1ull);
-    if (cur_count == 1) {
-      tile |= 1ull << GPU_TILE_END_FLAG_OFFSET;
-    }
+  while (count != 0) {
+    bool is_last = tail && (count == 1);
     uint64_t *pc = body;
     for (uint64_t head = *pc; head != 0; head = *pc) {
       bcodeptr_t op_pc = pc;
-      if (head & (1ull << V_HEAD_SIMD_FLAG_OFFSET)) {
-        pc += (head >> V_HEAD_SIZE_OFFSET) & V_HEAD_SIZE_MASK;
-      } else {
-        pc += (head >> V_M_HEAD_SIZE_OFFSET) & V_M_HEAD_SIZE_MASK;
+      pc += (head >> V_M_HEAD_SIZE_OFFSET) & V_M_HEAD_SIZE_MASK;
+      if ((head >> V_HEAD_BAR_FLAG_OFFSET) & 0x1ull) {
+        __syncthreads();
       }
-      RunOp(ctx, op_pc, head, tile);
-      __syncthreads();
+      RunOp(ctx, op_pc, head, tile_idx, is_last);
     }
-    tile |= 1ull << GPU_TILE_N_BEGIN_FLAG_OFFSET;
-    tile += kTileStride;
+    ++tile_idx;
+    --count;
   }
 }
 
-int InitVM(uint64_t local_mem_size) {
-  if (local_mem_size == 0 || g_local_mem_size != 0) {
-    return static_cast<int>(cudaErrorInvalidValue);
-  }
-  auto err = cudaFuncSetAttribute(dvm_vm_gpu, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                       static_cast<int>(local_mem_size));
-  if (err != cudaSuccess) {
-    return static_cast<int>(err);
-  }
-  err = cudaFuncSetAttribute(dvm_vm_gpu, cudaFuncAttributePreferredSharedMemoryCarveout,
-                                  cudaSharedmemCarveoutMaxShared);
-  if (err != cudaSuccess) {
-    return static_cast<int>(err);
-  }
-  g_local_mem_size = local_mem_size;
+
+inline constexpr uint32_t THREAD_ORDER_STEP = 64;
+inline constexpr uint32_t MAX_BLOCK_PER_SM = 8;
+
+struct BlockBudget {
+  uint32_t shared_limit;
+  uint32_t max_threads;
+};
+
+struct GpuSystem {
+  uint32_t sm_num;
+  uint32_t max_block_per_sm;
+  BlockBudget budgets[MAX_BLOCK_PER_SM];
+};
+
+static GpuSystem g_gpu;
+
+int LaunchVM(const VmParam &param, uint32_t block_dim, uint32_t threads, uint32_t shared_bytes, void *stream) {
+  cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+  dvm_vm_gpu<<<block_dim, threads, shared_bytes, cuda_stream>>>(param);
   return 0;
 }
 
-int LaunchVM(const VmParam &param, uint32_t block_dim, void *stream) {
-  if (block_dim == 0) {
-    return 0;
+uint64_t SelectBlockThread(uint64_t op_num, uint64_t tile_num, uint64_t tile_size, uint32_t shared_bytes) {
+  auto ceil_div = [](auto n, auto r) { return (n - 1) / r + 1; };
+  constexpr uint64_t kDispatchCost = 1;
+  constexpr uint64_t kThreadPenalty = 1;
+  constexpr uint64_t kWarpSize = 32;
+  constexpr uint32_t kBlockPenaltyScale = 1024;
+  constexpr uint64_t kBlockPenalty = 100 * kBlockPenaltyScale / 1000;
+  const uint32_t sm_num = g_gpu.sm_num;
+  uint32_t max_block_per_sm = std::min(g_gpu.max_block_per_sm, ceil_div(static_cast<uint32_t>(tile_num), sm_num));
+  while (max_block_per_sm > 1 && shared_bytes > g_gpu.budgets[max_block_per_sm - 1].shared_limit) {
+    max_block_per_sm--;
   }
-  if (g_local_mem_size == 0) {
-    return static_cast<int>(cudaErrorInvalidValue);
+  const uint64_t max_blocks = static_cast<uint64_t>(sm_num) * max_block_per_sm;
+  const uint64_t target_blocks = ceil_div(tile_num, ceil_div(tile_num, max_blocks));
+  const uint64_t tile_size_align = ceil_div(tile_size, THREAD_ORDER_STEP) * THREAD_ORDER_STEP;
+  uint64_t best_cost = static_cast<uint64_t>(-1);
+  uint64_t best_block_num = 0;
+  uint64_t best_thread = 0;
+  for (uint32_t i = 0; i < max_block_per_sm; ++i) {
+    uint64_t tile_per_block = ceil_div(tile_num, static_cast<uint64_t>(sm_num * (i + 1)));
+    uint64_t block_num = ceil_div(tile_num, tile_per_block);
+    uint64_t block_cost = (kBlockPenaltyScale + kBlockPenalty * kBlockPenaltyScale * (target_blocks - block_num) / target_blocks) * tile_per_block;
+    uint64_t max_threads = std::min(static_cast<uint64_t>(g_gpu.budgets[i].max_threads), tile_size_align);
+    for (uint64_t threads = THREAD_ORDER_STEP; threads <= max_threads; threads *= 2) {
+      uint64_t cost = (op_num * (ceil_div(tile_size, threads) + kDispatchCost) + kThreadPenalty * threads / kWarpSize) * block_cost;
+      if (cost < best_cost || (cost == best_cost && block_num > best_block_num)) {
+        best_cost = cost;
+        best_block_num = block_num;
+        best_thread = threads;
+      }
+    }
   }
-  cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
-  auto shared_bytes = static_cast<size_t>(g_local_mem_size);
-  dvm_vm_gpu<<<block_dim, kGpuThreads, shared_bytes, cuda_stream>>>(param);
-  return static_cast<int>(cudaGetLastError());
+  return best_block_num << 32 | best_thread;
 }
 
+int InitVM(int dev_id, SysConfig &conf) {
+  cudaDeviceProp prop;
+  auto err = cudaGetDeviceProperties(&prop, dev_id);
+  if (err != 0) {
+    return static_cast<int>(err);
+  }
+  g_gpu.sm_num = static_cast<uint64_t>(prop.multiProcessorCount);
+  uint32_t shared_mem_per_block_optin = prop.sharedMemPerBlockOptin;
+  uint32_t shared_mem_per_sm = prop.sharedMemPerMultiprocessor;
+  uint32_t max_threads_per_block = prop.maxThreadsPerBlock;
+  uint32_t max_threads_per_sm = prop.maxThreadsPerMultiProcessor;
+  uint32_t max_blocks_per_sm = prop.maxBlocksPerMultiProcessor;
+  err = cudaFuncSetAttribute(dvm_vm_gpu, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(shared_mem_per_block_optin));
+  if (err != cudaSuccess) {
+    return static_cast<int>(err);
+  }
+  g_gpu.max_block_per_sm = std::min(max_blocks_per_sm, MAX_BLOCK_PER_SM);
+  for (uint32_t i = 0; i < g_gpu.max_block_per_sm; ++i) {
+    uint32_t blocks_per_sm = i + 1;
+    uint32_t budget = std::min(shared_mem_per_sm / blocks_per_sm, shared_mem_per_block_optin) & ~0x3ffull;
+    int max_threads = std::min(max_threads_per_block, max_threads_per_sm / blocks_per_sm);
+    g_gpu.budgets[i].shared_limit = budget;
+    g_gpu.budgets[i].max_threads = max_threads;
+    for (int threads = THREAD_ORDER_STEP; threads <= max_threads; threads += THREAD_ORDER_STEP) {
+      int occ = 0;
+      err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, dvm_vm_gpu, threads, budget);
+      if (err != cudaSuccess || occ != blocks_per_sm) {
+        g_gpu.budgets[i].max_threads = threads - THREAD_ORDER_STEP;
+        break;
+      }
+    }
+  }
+  uint32_t default_block_per_sm = std::min(4u, g_gpu.max_block_per_sm);
+  conf.core_num = g_gpu.sm_num * default_block_per_sm ;
+  conf.local_mem_size = g_gpu.budgets[default_block_per_sm - 1].shared_limit;
+  conf.default_threads = g_gpu.budgets[default_block_per_sm - 1].max_threads;
+  return 0;
+}
 }  // namespace dvm::gpu

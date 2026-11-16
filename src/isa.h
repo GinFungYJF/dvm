@@ -265,6 +265,7 @@ enum vAtomicType {
 // head(load/store):
 //  ID(16) << 48 | ext(34) << 14 | wait_event(3) << 11 | set_event(3) << 8 | len(4) << 4 |
 //  wait_flag(1) << 3 | set_flag(1) << 2 | reserved(1) << 1 | SIMD_FLAG(1)
+// gpu: ID(16) << 48 | ext(34) << 14 | len(4) << 4 | bar(1) << 2 | SIMD_FLAG(1)
 
 // common area
 #define V_HEAD_SIMD_FLAG_OFFSET 0
@@ -321,6 +322,11 @@ enum vAtomicType {
 #define V_GROUP_OFFSET_SIZE 32
 #define vCompactX(x) ((x) >> 5)
 #define vDeCompactX(x) ((x) << 5)
+
+#ifdef DVM_ARCH_GPU
+#undef V_HEAD_SIZE_OFFSET
+#define V_HEAD_SIZE_OFFSET V_M_HEAD_SIZE_OFFSET
+#endif
 
 #ifndef _VM_KERNEL_
 #include "system.h"

@@ -258,7 +258,9 @@ class System : public Config {
 
   std::vector<void *> bins_;   // TODO: simt_bin_ && renamed_bin_ add to here
 
+ public:
 #ifdef DVM_ARCH_GPU
+  uint64_t default_threads_;
   static int CodeLaunchGPU(const System &self, const Code *code, void *extern_ws, void *stream);
 #else
   static int CodeLaunchRT(const System &self, const Code *code, void *extern_ws, void *stream);
