@@ -25,15 +25,14 @@
 
 namespace dvm {
 namespace py = pybind11;
-void DvmException(const char *error_str);
-class DataTypePy {
+class DVM_API DataTypePy {
  public:
   explicit constexpr DataTypePy(DataType dtype) : dtype_(dtype) {}
   operator DataType() const { return dtype_; }
   DataType dtype_;
 };
 
-class NDObjectPy {
+class DVM_API NDObjectPy {
  public:
   explicit NDObjectPy(NDObject *obj) : obj_(obj) {}
   py::object GetShape() const {
@@ -52,7 +51,7 @@ class NDObjectPy {
   NDObject *obj_;
 };
 
-class IntArrayRefPy {
+class DVM_API IntArrayRefPy {
  public:
   IntArrayRefPy() : shape_ref_(shape_) {}
   explicit IntArrayRefPy(const std::vector<int64_t> &shape) : shape_(shape), shape_ref_(shape_) {}
@@ -76,7 +75,7 @@ class IntArrayRefPy {
   IntArrayRef shape_ref_;
 };
 
-class ScalarRefPy {
+class DVM_API ScalarRefPy {
  public:
   ScalarRefPy() { data_.type = kDataTypeEnd; }
   explicit ScalarRefPy(DataTypePy type) { data_.type = type; }
@@ -95,7 +94,7 @@ class ScalarRefPy {
 using NDOpPyPtr = std::shared_ptr<NDObjectPy>;
 using ScalarRefPyPtr = std::shared_ptr<ScalarRefPy>;
 
-class KernelPy {
+class DVM_API KernelPy {
  public:
   KernelPy() = default;
   virtual ~KernelPy() {}
