@@ -1157,6 +1157,17 @@ void Comm::Init(void *hccl_comm) {
 
 Kernel::Kernel() : kernel_{nullptr} {}
 
+Kernel::Kernel(Kernel &other) : kernel_(other.kernel_) { other.kernel_ = nullptr; }
+
+Kernel &Kernel::operator=(Kernel &other) {
+  if (this != &other) {
+    delete kernel_;
+    kernel_ = other.kernel_;
+    other.kernel_ = nullptr;
+  }
+  return *this;
+}
+
 Kernel::~Kernel() { delete kernel_; }
 
 void Kernel::SetNameHint(const char *name, const char *fullname) { kernel_->SetNameHint(name, fullname); }

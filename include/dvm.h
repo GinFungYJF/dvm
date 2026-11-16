@@ -241,12 +241,8 @@ class DVM_API Kernel {
   /**
    * @brief Kernel copy. ONLY one Kernel hold the implementation instance.
    */
-  Kernel& operator=(Kernel &k) {
-    kernel_ = k.kernel_;
-    k.kernel_ = nullptr;
-    return *this;
-  }
-  explicit Kernel(Kernel &k) { *this = k; }
+  Kernel &operator=(Kernel &other);
+  explicit Kernel(Kernel &other);
 
   /**
    * @brief Set this kernel to a specific kernel type.
