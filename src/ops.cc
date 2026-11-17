@@ -1691,7 +1691,7 @@ uint64_t NDStore::EmitAtomicView(VectorKernel &k, ReduceOp *red) {
   if (clean_wrap == nullptr) {
     red->clean_wrap_ = clean_wrap = new AtomicCleanWrap(this, op.red_op);
   } else {
-    for (auto w = code.wrap_;  w != &code; w = w->next_) {
+    for (auto w = code.wrap_; w && w != &code; w = w->next_) {
       if (w == clean_wrap) {
         clean_wrap = nullptr;
         break;
