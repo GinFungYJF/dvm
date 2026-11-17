@@ -970,6 +970,7 @@ py::object RtKernelPy::Clone(py::object base, py::object remap) {
   for (auto ref : other->shape_) {
     if (helper.ref_map_.find(ref) == helper.ref_map_.end()) {
       auto clone = new IntArrayRef(shape_vec_.emplace_back(ref->data, ref->data + ref->size));
+      shape_.push_back(clone);
       helper.ref_map_[ref] = clone;
     }
   }
