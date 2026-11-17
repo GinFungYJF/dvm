@@ -17,11 +17,10 @@
 #ifndef _DVM_H_
 #define _DVM_H_
 
+#include "dvm_export.h"
 #include <cstdint>
 #include <cstddef>
 #include <vector>
-
-#define DVM_API __attribute__((visibility("default")))
 
 namespace dvm {
 enum DataType {
@@ -147,7 +146,9 @@ class DVM_API BFloat16 {
 };
 
 struct DVM_API IntArrayRef {
-  IntArrayRef() {}
+  IntArrayRef() : data(nullptr), size(0) {}
+  /** Stable-address form for cross shared-library callers. Never build this from a temporary. */
+  IntArrayRef(const int64_t *ptr, size_t count) : data(ptr), size(count) {}
   explicit IntArrayRef(const std::vector<int64_t> &other) : data(other.data()), size(other.size()) {}
   IntArrayRef &operator=(const std::vector<int64_t> &other) {
     data = other.data();

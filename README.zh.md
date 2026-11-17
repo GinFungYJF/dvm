@@ -83,13 +83,20 @@ python -m pip install -r requirements.txt
 
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
-source env.sh
-make -j8
+bash build.sh -b npu -j8
 python -c "import dvm; print(dvm.__file__)"
 ```
 
-构建会生成 `libdvm.a` 和 `_dvm_py.so`，并将 Python 扩展复制到 `python/dvm/`。
-输出的导入路径应指向当前代码目录。如需使用 Clang 编译 Host 代码：
+`build.sh` 会将 wheel 生成到 `dist/`。Ascend 后端产出 `dvm_rt`，其中包含 `libdvm.so`、
+`_dvm_py.so` 和公开头文件：
+
+```bash
+pip install dist/dvm_rt-*.whl
+```
+
+如需在 `output/` 中拿到裸库文件（`libdvm.a`、`libdvm.so`、`_dvm_py.so` 及校验和），
+使用 `bash build.sh -b npu -l`。`make` 目标同样保留，仍会将 Python 扩展复制到 `python/dvm/`。
+如需使用 Clang 编译 Host 代码：
 
 ```bash
 CXX=clang++ make -j8

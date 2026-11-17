@@ -40,13 +40,15 @@ python -m pip install -r requirements.txt
 
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
-source env.sh
-make -j8
+bash build.sh -b npu -j8
 python -c "import dvm; print(dvm.__file__)"
 DEVICE_ID=0 python examples/01_add.py
 ```
 
-[Makefile](Makefile) 会生成 `libdvm.a` 和 `_dvm_py.so`，并将 Python 扩展复制到 `python/dvm/`。
+[build.sh](build.sh) 会将 `dvm_rt` wheel 生成到 `dist/`，其中包含 `libdvm.so`、`_dvm_py.so` 和公开头文件，
+通过 `pip install dist/dvm_rt-*.whl` 安装。`dvm-torch` 仅支持 CUDA，因此 Ascend 构建会跳过它。
+使用 `-l` 可在 `output/` 中产出裸库（`libdvm.a`、`libdvm.so`、`_dvm_py.so`）及校验和。
+[Makefile](Makefile) 目标同样保留，仍会将 Python 扩展复制到 `python/dvm/`。
 [env.sh](env.sh) 将当前代码目录加入 `PYTHONPATH`；导入路径应指向本工作区的 `python/dvm/__init__.py`。
 修改原生代码后需重新编译。运行示例或测试时通过 `DEVICE_ID` 选择可用设备。
 如需使用 Clang 编译 host 代码，可执行 `CXX=clang++ make -j8`。

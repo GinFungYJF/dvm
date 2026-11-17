@@ -91,13 +91,20 @@ Replace the CANN path below with your installation path, then configure and buil
 
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
-source env.sh
-make -j8
+bash build.sh -b npu -j8
 python -c "import dvm; print(dvm.__file__)"
 ```
 
-The build produces `libdvm.a` and `_dvm_py.so`, and copies the Python extension into `python/dvm/`.
-The printed import path should point to this checkout. To use Clang for host compilation:
+`build.sh` builds the wheels into `dist/`. On Ascend it produces `dvm_rt`, which bundles `libdvm.so`,
+`_dvm_py.so` and the public headers:
+
+```bash
+pip install dist/dvm_rt-*.whl
+```
+
+To get the plain library files instead (`libdvm.a`, `libdvm.so`, `_dvm_py.so`, checksums) in `output/`,
+use `bash build.sh -b npu -l`. The `make` targets remain available as well and still copy the Python
+extension into `python/dvm/`. To use Clang for host compilation:
 
 ```bash
 CXX=clang++ make -j8

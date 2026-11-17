@@ -1,0 +1,161 @@
+# Copyright 2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Regressions for defects found in code review.
+
+Each test targets a case that produced silently wrong numbers or a stuck graph,
+so they assert on dtype and on counters as well as on values.
+"""
+
+import pytest
+import torch
+
+import dvm_torch
+from conftest import CUDA, assert_same, eager, fused
+
+
+@CUDA
+@pytest.mark.parametrize("name", ["sqrt", "exp", "log", "reciprocal", "rsqrt", "sigmoid"])
+def test_float_math_on_int_input_promotes(name):
+    """ATen promotes an integer input to float; the fused path must not keep int."""
+    fn = getattr(torch, name)
+    t = torch.tensor([4, 9, 16], device="cuda", dtype=torch.int32)
+    with eager():
+        expected = fn(t)
+    with fused():
+        actual = fn(t)
+    assert actual.dtype == expected.dtype == torch.float32, (
+        "{} returned {} instead of float32".format(name, actual.dtype)
+    )
+    assert_same(actual, expected)
+
+
+@CUDA
+@pytest.mark.parametrize("name", ["relu", "neg", "abs"])
+def test_integer_preserving_unary_keeps_dtype(name):
+    """These keep int32 in ATen and the VM has an INT32 form, so fuse them."""
+    fn = getattr(torch, name)
+    t = torch.tensor([-4, 0, 9], device="cuda", dtype=torch.int32)
+    with eager():
+        expected = fn(t)
+    with fused():
+        actual = fn(t)
+    assert actual.dtype == expected.dtype == torch.int32
+    assert_same(actual, expected)
+
+
+@CUDA
+@pytest.mark.parametrize("name", ["round", "floor", "ceil", "trunc"])
+def test_no_int32_opcode_falls_back(name):
+    """The VM has no INT32 round/floor/ceil/trunc; these must not trap."""
+    fn = getattr(torch, name)
+    t = torch.tensor([-4, 0, 9], device="cuda", dtype=torch.int32)
+    with eager():
+        expected = fn(t)
+    with fused():
+        actual = fn(t)
+    assert actual.dtype == expected.dtype == torch.int32
+    assert_same(actual, expected)
+
+
+@CUDA
+def test_int_tensor_true_division_promotes():
+    a = torch.tensor([5, 7, 9], device="cuda", dtype=torch.int32)
+    b = torch.tensor([2, 2, 4], device="cuda", dtype=torch.int32)
+    with eager():
+        expected = a / b
+    with fused():
+        actual = a / b
+    assert actual.dtype == expected.dtype == torch.float32
+    assert_same(actual, expected)
+
+
+@CUDA
+def test_disable_ops_actually_disables():
+    """`disable_ops=mul` uses the bare name; it must match aten::mul."""
+    a = torch.randn(256, device="cuda")
+    b = torch.randn(256, device="cuda")
+    dvm_torch.enable(disable_ops="mul")
+    try:
+        dvm_torch.reset_stats()
+        _ = a * b
+        assert dvm_torch.stats()["emitted"] == 0, "mul was fused despite disable_ops"
+    finally:
+        dvm_torch.disable()
+
+
+@CUDA
+def test_enable_ops_actually_restricts():
+    a = torch.randn(256, device="cuda")
+    b = torch.randn(256, device="cuda")
+    dvm_torch.enable(enable_ops="add")
+    try:
+        dvm_torch.reset_stats()
+        _ = a * b
+        assert dvm_torch.stats()["emitted"] == 0, "mul was fused despite enable_ops=add"
+    finally:
+        dvm_torch.disable()
+
+
+@CUDA
+def test_single_op_graph_is_compiled():
+    """A live single-op graph also executes through DVM."""
+    a = torch.randn(4096, device="cuda")
+    b = torch.randn(4096, device="cuda")
+    with eager():
+        expected = a * b
+    dvm_torch.enable()
+    try:
+        dvm_torch.reset_stats()
+        out = a * b
+        dvm_torch.flush()
+    finally:
+        dvm_torch.disable()
+    stats = dvm_torch.stats()
+    assert stats["flushes"] == 1
+    assert stats["emitted"] == 1
+    assert stats["graph_sizes"] == {1: 1}
+    assert_same(out, expected)
+
+
+@CUDA
+def test_stream_switch_rebinds_stream():
+    """After a switch the next graph must launch on the new stream."""
+    s2 = torch.cuda.Stream()
+    a = torch.randn(1024, device="cuda")
+    b = torch.randn(1024, device="cuda")
+    with fused():
+        with torch.cuda.stream(s2):
+            x = a * b
+        # Back on the default stream: the deferred work must be visible here.
+        y = x + 1
+    s2.synchronize()
+    torch.cuda.synchronize()
+    assert_same(y, a.clone() * b.clone() + 1)
+
+
+
+@CUDA
+def test_host_read_of_pending_scalar():
+    """Reading a pending scalar on the host must materialise the graph first."""
+    a = torch.randn(64, device="cuda")
+    dvm_torch.enable()
+    try:
+        dvm_torch.reset_stats()
+        pending = a * 2  # deferred
+        value = pending[0].item()
+    finally:
+        dvm_torch.disable()
+    expected = (a.clone() * 2)[0].item()
+    assert value == expected, "host read returned {} not {}".format(value, expected)
+    assert dvm_torch.stats()["flushes"] >= 1

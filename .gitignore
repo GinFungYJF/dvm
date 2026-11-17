@@ -1,7 +1,17 @@
 *.o
 *.a
 *.so
+*.so.*
 *__pycache__*
 
 # Editor
 .vscode
+
+# Build state
+.dvm-build-config
+/_dvm_py.so
+/packages/*/build/
+/packages/*/*.egg-info/
+/build/
+/dist/
+/output/

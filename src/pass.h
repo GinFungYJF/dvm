@@ -151,7 +151,7 @@ class BasicBlock : public ObjectList {
 ///   %4 = Store(%3)
 /// }
 /// ----------
-void ReorderStore(BasicBlock &block);
+DVM_API void ReorderStore(BasicBlock &block);
 
 /// @brief Reorder Load, to bring the that were used earlier forward
 /// @example
@@ -175,17 +175,17 @@ void ReorderStore(BasicBlock &block);
 ///   %6 = Store(%5)
 /// }
 /// ----------
-void ReorderLoad(BasicBlock &block);
+DVM_API void ReorderLoad(BasicBlock &block);
 
 // For debug
-void PrintPeakLive(BasicBlock &bb);
+DVM_API void PrintPeakLive(BasicBlock &bb);
 
 /// @brief Reorder objects, to minimum peak live variables
 /// @details there are two methods now.
 /// The heuristic version is quick but sometimes give suboptimal results.
 /// The DP version is slow but give optimal results.
 /// Currently we use the heuristic method.
-void CompactPeakLiveness(BasicBlock &bb);
+DVM_API void CompactPeakLiveness(BasicBlock &bb);
 
 /// @brief Eliminate Reshape Objects if possible
 /// @example
@@ -204,22 +204,22 @@ void CompactPeakLiveness(BasicBlock &bb);
 ///   %3::(8,4) = Store(%2)
 /// }
 /// ----------
-void EliminateReshape(BasicBlock &bb);
+DVM_API void EliminateReshape(BasicBlock &bb);
 
 /// @brief Fuse supported C310 pointwise subgraphs into a JIT Custom op.
 /// The pass is gated by the default-off Config VF fusion switch.
-void VfFusion(BasicBlock &bb);
+DVM_API void VfFusion(BasicBlock &bb);
 
 /// @brief Optimize memory transfer operations, especially from UB (Unified Buffer) to GM (Global Memory), by
 /// reorganizing non-continuous memory segments within the UB into a continuous memory layout. This significantly speeds
 /// up the data transfer process to the GM.
-void InsertRemovePad(BasicBlock &block);
+DVM_API void InsertRemovePad(BasicBlock &block);
 
-void VectorDoubleBuffer(BasicBlock &block);
+DVM_API void VectorDoubleBuffer(BasicBlock &block);
 
-void DeadCodeEliminate(BasicBlock &bb);
+DVM_API void DeadCodeEliminate(BasicBlock &bb);
 
-void EliminateDiamondView(BasicBlock &bb);
+DVM_API void EliminateDiamondView(BasicBlock &bb);
 
 using Pass = void (*)(BasicBlock &);
 

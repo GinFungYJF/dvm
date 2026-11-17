@@ -76,7 +76,7 @@ struct RelocAddr {
 };
 
 class Code;
-class CodeWrap {
+class DVM_API CodeWrap {
  public:
   CodeWrap() = default;
   virtual ~CodeWrap() {}
@@ -285,7 +285,7 @@ class Code : public CodeWrap {
 #endif
 };
 
-class CodeLaunchGuard : public CodeWrap {
+class DVM_API CodeLaunchGuard : public CodeWrap {
  public:
   CodeLaunchGuard(Code &root);
   virtual ~CodeLaunchGuard();
