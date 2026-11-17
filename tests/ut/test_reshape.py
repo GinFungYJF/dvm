@@ -23,6 +23,7 @@ from tests.mark_utils import arg_mark
 @pytest.mark.parametrize("shape1, shape2, shape3, reduce_dims",
                          [[(10, 3, 1), (10, 3, 4), (1, 10, 12), (2,)],
                           [(10, 3, 1), (10, 3, 4), (1, 10, 12), (1,)]])
+@pytest.mark.gpu
 def test_reduce_forward(shape1, shape2, shape3, reduce_dims):
     t = Tester()
     b = np.full(shape1, 0.1, np.float32)
@@ -40,6 +41,7 @@ def test_reduce_forward(shape1, shape2, shape3, reduce_dims):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize("shape1", [(16, 16)])
 @pytest.mark.parametrize("shape2", [(32, 8)])
 def test_unary(shape1, shape2):
@@ -54,6 +56,7 @@ def test_unary(shape1, shape2):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize("shape1", [(16, 16)])
 @pytest.mark.parametrize("shape2", [(32, 8)])
 def test_cast(shape1, shape2):
@@ -69,6 +72,7 @@ def test_cast(shape1, shape2):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize("shape", [(3, 3)])
 @pytest.mark.parametrize("shape2", [(9,)])
 @pytest.mark.parametrize('type, eps', [(np.float32, 1e-5)])
@@ -87,6 +91,7 @@ def test_select_forward(shape, shape2, type, eps):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_broadcast_backward():
     t = Tester()
     b = np.full([1, 8], 0.3, np.float32)
@@ -99,6 +104,7 @@ def test_broadcast_backward():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_broadcast_forward():
     t = Tester()
     b = np.full([10, 3, 4], 0.3, np.float32)
@@ -110,6 +116,7 @@ def test_broadcast_forward():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_broadcast_s():
     t = Tester()
     z = t.full(0.3, [3, 10], "float32")
@@ -120,6 +127,7 @@ def test_broadcast_s():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_multi_reshape_1():
     t = Tester()
     a = np.random.rand(54, 89).astype(np.float32)
@@ -161,6 +169,7 @@ def test_element_any_forward():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_unalign_broadcast():
     t = Tester()
     a = np.full([1, 320], 0.3, np.float16)
@@ -175,6 +184,7 @@ def test_unalign_broadcast():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize("shape1, shape2, shape3", [
     [[10, 20, 8], [20, 8], [200, 8]],
     [[10, 20, 8], [8], [200, 8]],
@@ -194,6 +204,7 @@ def test_unalign_broadcast_2(shape1, shape2, shape3):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reduce_lead_dim():
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [128, 1]).astype(np.float32)
@@ -205,6 +216,7 @@ def test_reduce_lead_dim():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize('shape1, shape2', [([2, 3, 64], [2, 6, 32]),
                                             ([1000, 4], [100, 40]),  # lead dim
                                             ])
@@ -220,6 +232,7 @@ def test_reshape(shape1, shape2):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize('shape1, shape2', [([2, 3, 64], [2, 6, 32]), ([128], [128, 1])])
 def test_reshape_direct_store(shape1, shape2):
     t = Tester()
@@ -232,6 +245,7 @@ def test_reshape_direct_store(shape1, shape2):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize('shape1, shape2', [
     ([1000, 4], [100, 40]),  # 2 -> 2
     ([1000, 4], [20, 5, 40]),  # 2 -> 3
@@ -261,6 +275,7 @@ def test_reshape_broker_shapes(shape1, shape2):
     ([2, 10, 64], [64], [20, 64], (1,)),  # forward dim broadcast
     ([10, 4, 64], [10, 4, 1], [10, 32, 8], (1,))  # splitcodegen: forward+backward split
 ])
+@pytest.mark.gpu
 def test_reshape_broker_prop(shape_a, shape_b, shape_c, red_dims):
     ''' add(a, b) -> reshape(c) - > reduce(dims) '''
     t = Tester()
@@ -338,6 +353,7 @@ def test_matmul_post_fusion_broadcast(shape_a, shape_b, shape_c, shape_d):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reshape_expand_dims():
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [128]).astype(np.float32)
@@ -350,6 +366,7 @@ def test_reshape_expand_dims():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reshape_share_domain():
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [128]).astype(np.float32)
@@ -362,6 +379,7 @@ def test_reshape_share_domain():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reshape_fallback_sort():
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [4, 1, 1, 512]).astype(np.float32)
@@ -378,6 +396,7 @@ def test_reshape_fallback_sort():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reshape_before_after_connect():
     t = Tester()
     a = np.random.normal(0.0, 0.03, [10, 1, 1000]).astype(np.float32)
@@ -390,6 +409,7 @@ def test_reshape_before_after_connect():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_auto_spec_reshape_cross_dim():
     t = Tester()
     a = np.random.normal(0.0, 0.03, [10, 1000]).astype(np.float32)
@@ -402,6 +422,7 @@ def test_auto_spec_reshape_cross_dim():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reshape_expand_outmost_dim():
     t = Tester()
     a = np.random.normal(0.0, 0.01, [1, 10, 1, 200]).astype(np.float32)

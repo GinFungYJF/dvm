@@ -22,6 +22,7 @@ from tests.mark_utils import arg_mark
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('dim', [64, 256, 251])
+@pytest.mark.gpu
 def test_reduce_x(dim):
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [10, dim]).astype(np.float32)
@@ -33,6 +34,7 @@ def test_reduce_x(dim):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('r_dim, s_dim', [(6, 64), (6, 60), (2, 383 * 16)])
+@pytest.mark.gpu
 def test_reduce_y(r_dim, s_dim):
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [10, r_dim, s_dim]).astype(np.float32)
@@ -44,6 +46,7 @@ def test_reduce_y(r_dim, s_dim):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('i, j', [(32, 65), (31, 89), (31, 90), (31, 93), (30, 82), (30, 83), (30, 85)])
+@pytest.mark.gpu
 def test_reduce_i_j(i, j):
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [3, 1280, i, j]).astype(np.float32)
@@ -56,6 +59,7 @@ def test_reduce_i_j(i, j):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('dims', [(1, 2, 3), (1, 3, 5), (1, 2, 5, 6), (5, 6), (0, 1, 2, 3, 4, 5, 6)])
+@pytest.mark.gpu
 def test_reduce_normalize(dims):
     t = Tester()
     shape = [6, 4, 2, 5, 1, 3, 8]
@@ -68,6 +72,7 @@ def test_reduce_normalize(dims):
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('dim', [1001, 1024])
+@pytest.mark.gpu
 def test_reduce_atomic(dim):
     t = Tester()
     a = np.full([64, dim], 0.01, np.float32)
@@ -78,7 +83,7 @@ def test_reduce_atomic(dim):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
-@pytest.mark.parametrize("dvm_op, np_op", [(Tester.sum, np.sum), (Tester.min, np.min), ((Tester.max, np.max))])
+@pytest.mark.parametrize("dvm_op, np_op", [(pytest.param(Tester.sum, np.sum, marks=pytest.mark.gpu)), (Tester.min, np.min), ((Tester.max, np.max))])
 @pytest.mark.parametrize('in_shape, dims', [[[511, 1024], (1,)], [[521, 1024], (1,)],
                                             [[35053], (0,)],
                                             [[120, 1], (0,)],  # lead 1 not include
@@ -224,6 +229,7 @@ def test_multi_determ():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_elemwise_reduce():
     t = Tester()
     a = np.full([32, 2048], 0.01, np.float32)
@@ -274,6 +280,7 @@ def test_mixed_reduce_determ(dims):
 @pytest.mark.parametrize('in_shape, dims', [[[1024, 1000], (0, 1)],
                                             [[3, 4, 120, 136], (0, 2, 3)],
                                             [[3, 1280, 2, 2], (0, 2, 3)]])
+@pytest.mark.gpu
 def test_reduce_insert_accumulate(in_shape, dims):
     t = Tester()
     a = np.random.normal(-0.5, 0.5, in_shape).astype(np.float32)
@@ -286,6 +293,7 @@ def test_reduce_insert_accumulate(in_shape, dims):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reduce_insert_accumulate_rank_3():
     t = Tester()
     a = np.random.normal(-0.5, 0.5, [32, 12, 1, 1]).astype(np.float32)

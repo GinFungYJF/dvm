@@ -23,6 +23,7 @@ namespace dvm::gpu {
 #define GPU_VM_ACCESS_OPS(X) \
   X(F_LOAD, V_LOAD) \
   X(F_STORE, V_STORE) \
+  X(F_STORE_ATOMIC, V_STORE_ATOMIC) \
   X(F_LOAD_DUMMY, V_LOAD_DUMMY)
 
 #define GPU_VM_SIMD_OPS(X) \
@@ -121,7 +122,11 @@ namespace dvm::gpu {
   X(F_SEL_INT32, V_SEL_INT32) \
   X(F_POW, V_POW) \
   X(F_LOGICAL_AND_BOOL, V_LOGICAL_AND_BOOL) \
-  X(F_LOGICAL_OR_BOOL, V_LOGICAL_OR_BOOL)
+  X(F_LOGICAL_OR_BOOL, V_LOGICAL_OR_BOOL) \
+  X(F_CLR_PAD, V_CLR_PAD) \
+  X(F_RSUM_X, V_RSUM_X) \
+  X(F_RSUM_Y, V_RSUM_Y) \
+  X(F_ATOMICCUM, V_ATOMICCUM)
 
 enum GpuVmOpId : uint8_t {
 #define GPU_VM_ENUM_ENTRY(gpu, host) gpu,

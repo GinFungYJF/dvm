@@ -13,6 +13,7 @@
 # limitations under the License.
 # ============================================================================
 
+import pytest
 import numpy as np
 from dvm.tester import Tester
 from tests.mark_utils import arg_mark
@@ -124,6 +125,7 @@ def test_zero_shape():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_zero_shape_clean():
     t = Tester()
     a = np.full([10, 0, 2], 0.01, np.float32)
@@ -136,6 +138,7 @@ def test_zero_shape_clean():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_zero_shape_dyn_shape():
     t = Tester("vector:dyn")
     x1 = t.load([-1], "float32")

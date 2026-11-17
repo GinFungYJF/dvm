@@ -32,7 +32,7 @@ constexpr uint32_t kInvalidTile = 0xffffffffu;
 
 __device__ __forceinline__ uint32_t AlignUp32(uint32_t x) { return (x + 31u) & ~31u; }
 
-enum GpuRoundMode { kGpuRoundCacheLoad, kGpuRoundCacheStore, kGpuRoundCacheNone };
+enum GpuRoundMode { kGpuRoundCacheLoad, kGpuRoundCacheStore, kGpuRoundStoreAtomic, kGpuRoundCacheNone };
 
 // Kept in sync with RoundUpTileIdx() in src/vm_aiv.h.
 template <GpuRoundMode mode>
@@ -45,6 +45,8 @@ __device__ __forceinline__ uint32_t RoundUpTileIdxGpu(uint32_t tile_idx, uint32_
       return r_tile_idx;
     } else if (mode == kGpuRoundCacheStore) {
       return r_tile_idx * r1 == tile_idx ? r_tile_idx : kInvalidTile;
+    } else if (mode == kGpuRoundStoreAtomic) {
+      return r_tile_idx * r1 + r1 - 1 == tile_idx ? r_tile_idx : kInvalidTile;
     }
     return r_tile_idx;
   } else if (round_rank == 2) {
@@ -70,6 +72,8 @@ __device__ __forceinline__ uint32_t RoundUpTileIdxGpu(uint32_t tile_idx, uint32_
       return p1 + p3;
     } else if (mode == kGpuRoundCacheStore) {
       return (tile_idx < p0 * r1 + r2 * r3) && (p3 * r3 == p2) ? p1 + p3 : kInvalidTile;
+    } else if (mode == kGpuRoundStoreAtomic) {
+      return p3 * r3 + r3 - 1 == p2 ? p1 + p3 : kInvalidTile;
     }
     return p1 + p3;
   } else {
@@ -102,6 +106,32 @@ __device__ __forceinline__ void ParallelFor(uint32_t count, F f) {
   for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
     f(i);
   }
+}
+
+__device__ __forceinline__ double WarpReduceSum(double value) {
+  const unsigned mask = __activemask();
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value += __shfl_down_sync(mask, value, offset);
+  }
+  return value;
+}
+
+__device__ __forceinline__ double BlockReduceSum(double value, double *scratch) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t warp = threadIdx.x >> 5;
+  const uint32_t warp_count = (blockDim.x + 31u) >> 5;
+  value = WarpReduceSum(value);
+  if (lane == 0) {
+    scratch[warp] = value;
+  }
+  __syncthreads();
+  value = threadIdx.x < warp_count ? scratch[threadIdx.x] : 0.0;
+  __syncthreads();
+  if (warp == 0) {
+    value = WarpReduceSum(value);
+  }
+  return value;
 }
 
 template <typename T>
@@ -717,7 +747,199 @@ __device__ __forceinline__ void StoreOp(VmCtx &ctx, uint64_t *pc, uint64_t head,
   CopyUbToGm(ctx, dst, xn, iter_num, iter_size, pad_size >> 5, 0);
 }
 
-__device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_last) {
+__device__ __forceinline__ void ClearPadOp(VmCtx &ctx, uint64_t *pc, uint64_t head, bool is_last) {
+  vClearPad op;
+  vClearPad::Decode(pc, head, op);
+  uint32_t iter_num = NarrowU32(op.iter_num);
+  uint32_t iter_size = NarrowU32(op.iter_size);
+  uint32_t iter_stride = NarrowU32(op.iter_stride);
+  uint32_t simd_width = NarrowU32(op.simd_width);
+  uint32_t iter_tail = NarrowU32(op.iter_tail);
+  if (is_last && iter_tail != 0) {
+    iter_size = iter_tail;
+    iter_stride = iter_tail + simd_width - (iter_tail % simd_width);
+  }
+  if (iter_num == 0 || iter_size >= iter_stride) {
+    return;
+  }
+  union {
+    uint32_t u;
+    float f;
+  } scalar;
+  scalar.u = static_cast<uint32_t>(op.scalar);
+  float *xd = UBPtr<float>(ctx, NarrowU32(op.xd));
+  uint32_t pad = iter_stride - iter_size;
+  ParallelFor(iter_num * pad, [&](uint32_t idx) {
+    uint32_t row = idx / pad;
+    uint32_t col = idx - row * pad;
+    xd[row * iter_stride + iter_size + col] = scalar.f;
+  });
+}
+
+__device__ __forceinline__ void ReduceSumXOp(VmCtx &ctx, uint64_t *pc, uint64_t head, bool is_last) {
+  vReduceX op;
+  vReduceX::Decode(pc, head, op);
+  vReduceX::DecodeBlock(pc, op);
+  uint32_t red_size = NarrowU32(is_last ? op.red_tail : op.red_size);
+  uint32_t dup_size = NarrowU32(op.dup_size);
+  uint32_t dup_block = NarrowU32(op.dup_block);
+  uint32_t dup_pad = NarrowU32(op.dup_pad);
+  if (red_size == 0 || dup_size == 0 || dup_block == 0) {
+    return;
+  }
+  float *xd = UBPtr<float>(ctx, NarrowU32(op.xd));
+  const float *xn = UBCPtr<float>(ctx, NarrowU32(op.xn));
+  uint32_t dst_stride = dup_block + dup_pad;
+  uint32_t src_stride = red_size * dup_block;
+  uint32_t iter_count = dup_size / dup_block;
+  uint32_t group_count = iter_count * dup_block;
+  if (group_count == 1 && red_size >= 64) {
+    double sum = 0.0;
+    for (uint32_t j = threadIdx.x; j < red_size; j += blockDim.x) {
+      sum += static_cast<double>(xn[j]);
+    }
+    sum = BlockReduceSum(sum, reinterpret_cast<double *>(xd + 2));
+    if (threadIdx.x == 0) {
+      xd[0] = static_cast<float>(sum);
+    }
+    __syncthreads();
+    return;
+  }
+  uint32_t warp_count = (blockDim.x + 31u) >> 5;
+  if (group_count > 1 && red_size >= 64) {
+    uint32_t warp = threadIdx.x >> 5;
+    uint32_t lane = threadIdx.x & 31u;
+    for (uint32_t idx = warp; idx < group_count; idx += warp_count) {
+      uint32_t k = idx / dup_block;
+      uint32_t i = idx - k * dup_block;
+      const float *src = xn + k * src_stride + i * red_size;
+      double sum = 0.0;
+      for (uint32_t j = lane; j < red_size; j += 32u) {
+        sum += static_cast<double>(src[j]);
+      }
+      sum = WarpReduceSum(sum);
+      if (lane == 0) {
+        xd[k * dst_stride + i] = static_cast<float>(sum);
+      }
+    }
+    return;
+  }
+  ParallelFor(group_count, [&](uint32_t idx) {
+    uint32_t k = idx / dup_block;
+    uint32_t i = idx - k * dup_block;
+    const float *src = xn + k * src_stride + i * red_size;
+    double sum = 0.0;
+    for (uint32_t j = 0; j < red_size; ++j) {
+      sum += static_cast<double>(src[j]);
+    }
+    xd[k * dst_stride + i] = static_cast<float>(sum);
+  });
+}
+
+__device__ __forceinline__ void ReduceSumYOp(VmCtx &ctx, uint64_t *pc, uint64_t head, bool is_last) {
+  vReduceY op;
+  vReduceY::Decode(pc, head, op);
+  uint32_t red_size = NarrowU32(is_last ? op.red_tail : op.red_size);
+  uint32_t iter_size = NarrowU32(op.iter_size);
+  uint32_t dup_num = NarrowU32(op.dup_num);
+  if (red_size == 0 || iter_size == 0 || dup_num == 0) {
+    return;
+  }
+  float *xd = UBPtr<float>(ctx, NarrowU32(op.xd));
+  const float *xn = UBCPtr<float>(ctx, NarrowU32(op.xn));
+  uint32_t count = dup_num * iter_size;
+  if (red_size == 1) {
+    ParallelFor(count, [&](uint32_t idx) { xd[idx] = xn[idx]; });
+    return;
+  }
+  uint32_t src_stride = red_size * iter_size;
+  ParallelFor(count, [&](uint32_t idx) {
+    uint32_t d = idx / iter_size;
+    uint32_t t = idx - d * iter_size;
+    const float *src = xn + d * src_stride + t;
+    double sum = 0.0;
+    for (uint32_t k = 0; k < red_size; ++k) {
+      sum += static_cast<double>(src[k * iter_size]);
+    }
+    xd[idx] = static_cast<float>(sum);
+  });
+}
+
+__device__ __forceinline__ bool AtomicCumInRound(uint32_t tile_idx, uint32_t round_rank, const uint64_t *rounds,
+                                                 bool is_begin) {
+  if (round_rank == 1) {
+    uint32_t r1 = static_cast<uint32_t>(rounds[0]);
+    return (tile_idx % r1) == 0 || is_begin;
+  }
+  if (round_rank == 3) {
+    uint32_t r2 = static_cast<uint32_t>(rounds[0] >> 32);
+    uint32_t r3 = static_cast<uint32_t>(rounds[1]);
+    uint32_t p2 = tile_idx % (r2 * r3);
+    uint32_t p3 = p2 / r3;
+    return p3 * r3 == p2 || is_begin;
+  }
+  return true;
+}
+
+__device__ __forceinline__ void AtomicCumOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx,
+                                            bool is_begin) {
+  vAtomicCum op;
+  vAtomicCum::Decode(pc, head, op);
+  uint32_t count = NarrowU32(op.count);
+  if (count == 0) {
+    return;
+  }
+  float *xd = UBPtr<float>(ctx, NarrowU32(op.xd));
+  const float *xn = UBCPtr<float>(ctx, NarrowU32(op.xn));
+  uint32_t round_rank = NarrowU32(op.round_rank);
+  if (round_rank != 0 && !AtomicCumInRound(tile_idx, round_rank, pc + vAtomicCum::ROUND_OFFSET, is_begin)) {
+    ParallelFor(count, [&](uint32_t i) { xd[i] += xn[i]; });
+  } else {
+    ParallelFor(count, [&](uint32_t i) { xd[i] = xn[i]; });
+  }
+}
+
+__device__ __forceinline__ void StoreAtomicOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_end,
+                                              bool is_last) {
+  vStoreAtomic op;
+  vStoreAtomic::Decode(pc, head, op);
+  uint32_t round_rank = NarrowU32(op.round_rank);
+  if (round_rank != 0) {
+    uint32_t mapped = RoundUpTileIdxGpu<kGpuRoundStoreAtomic>(tile_idx, round_rank, pc + vStoreAtomic::ROUND_OFFSET);
+    if (mapped == kInvalidTile) {
+      if (!is_end) {
+        return;
+      }
+      mapped = RoundUpTileIdxGpu<kGpuRoundCacheNone>(tile_idx, round_rank, pc + vStoreAtomic::ROUND_OFFSET);
+    }
+    tile_idx = mapped;
+  }
+  if (op.red_op != V_RED_SUM) {
+    return;
+  }
+  if (is_last) {
+    op.iter_num = op.iter_tail;
+  }
+  uint32_t iter_num = NarrowU32(op.iter_num);
+  uint32_t iter_size = NarrowU32(op.iter_size);
+  uint32_t pad_size = NarrowU32(op.pad_size);
+  if (iter_num == 0 || iter_size < sizeof(float)) {
+    return;
+  }
+  uint32_t elem_count = iter_size / sizeof(float);
+  uint32_t src_row = iter_size + pad_size;
+  const uint8_t *src = ctx.ub + NarrowU32(op.xn);
+  uint8_t *dst = reinterpret_cast<uint8_t *>(op.to) + static_cast<uint64_t>(tile_idx) * op.tile_stride;
+  ParallelFor(iter_num * elem_count, [&](uint32_t idx) {
+    uint32_t row = idx / elem_count;
+    uint32_t col = idx - row * elem_count;
+    float value = reinterpret_cast<const float *>(src + row * src_row)[col];
+    atomicAdd(reinterpret_cast<float *>(dst + row * iter_size) + col, value);
+  });
+}
+
+__device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_begin,
+                                      bool is_end, bool is_last) {
   uint32_t id = head >> V_HEAD_ID_OFFSET;
   switch (id) {
     case F_LOAD:
@@ -725,6 +947,9 @@ __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, u
       break;
     case F_STORE:
       StoreOp(ctx, pc, head, tile_idx, is_last);
+      break;
+    case F_STORE_ATOMIC:
+      StoreAtomicOp(ctx, pc, head, tile_idx, is_end, is_last);
       break;
     case F_LOAD_DUMMY:
       break;
@@ -1304,6 +1529,18 @@ __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, u
       BinaryOp<BoolTag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.xm), NarrowU32(op.count), OrOp{});
       break;
     }
+    case F_CLR_PAD:
+      ClearPadOp(ctx, pc, head, is_last);
+      break;
+    case F_RSUM_X:
+      ReduceSumXOp(ctx, pc, head, is_last);
+      break;
+    case F_RSUM_Y:
+      ReduceSumYOp(ctx, pc, head, is_last);
+      break;
+    case F_ATOMICCUM:
+      AtomicCumOp(ctx, pc, head, tile_idx, is_begin);
+      break;
     default:
       TrapUnsupported(id, head, pc);
       break;
@@ -1351,13 +1588,16 @@ __global__ void dvm_vm_gpu(__grid_constant__ const VmParam param) {
   uint32_t tail_diff =
     static_cast<uint32_t>((entry >> V_ENTRY_V_TILE_TAIL_OFFSET) & ((1ull << V_ENTRY_V_TILE_TAIL_BITS) - 1ull));
   uint32_t count = body_tile;
-  uint32_t tile_idx = bid * body_tile;
+  uint32_t tile_begin = bid * body_tile;
+  uint32_t tile_idx = tile_begin;
   bool tail = (bid == bnum - 1);
   if (tail) {
     count -= tail_diff;
   }
 
   while (count != 0) {
+    bool is_begin = tile_idx == tile_begin;
+    bool is_end = (count == 1);
     bool is_last = tail && (count == 1);
     uint64_t *pc = body;
     for (uint64_t head = *pc; head != 0; head = *pc) {
@@ -1366,7 +1606,7 @@ __global__ void dvm_vm_gpu(__grid_constant__ const VmParam param) {
       if ((head >> V_HEAD_BAR_FLAG_OFFSET) & 0x1ull) {
         __syncthreads();
       }
-      RunOp(ctx, op_pc, head, tile_idx, is_last);
+      RunOp(ctx, op_pc, head, tile_idx, is_begin, is_end, is_last);
     }
     ++tile_idx;
     --count;

@@ -49,7 +49,7 @@ def test_basic(shape1, shape2, shape3):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
-@pytest.mark.parametrize('determ', [False, True])
+@pytest.mark.parametrize('determ', [pytest.param(False, marks=pytest.mark.gpu), True])
 def test_reduce(determ):
     t = Tester("parallel")
     t.set_deterministic(determ)

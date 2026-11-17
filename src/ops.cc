@@ -623,12 +623,14 @@ void NDObject::Inspect(Inspector &sp) {}
 void NDObject::TileCollectSimt(NDObject *op, TileInfo &info) { info.flags |= ObjectMeta::kSimt; }
 
 bool NDAccess::IsSupportView() const {
+#ifndef DVM_ARCH_GPU
   if (obj_id_ == kViewLoad || obj_id_ == kViewStore || obj_id_ == kLoadDummy || obj_id_ == kLoad) {
     return true;
   }
   if (obj_id_ == kStore && (lhs_->obj_id_ != kReduce || !g_system.deterministic_) && lhs_->obj_id_ != kElementAny) {
     return true;
   }
+#endif
   return false;
 }
 

@@ -20,6 +20,7 @@ from tests.mark_utils import arg_mark
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_vec_vec():
     t = Tester("seq")
     t.seq_add(Tester.K_VEC)
@@ -71,6 +72,7 @@ def test_seq_mix_vec():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_inplace_reuse():
     ax = np.full([1024], 0.05, np.float32)
     t = Tester("seq")
@@ -86,6 +88,7 @@ def test_seq_inplace_reuse():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_inplace_stage():
     ax = np.full([1024], 0.05, np.float32)
     t = Tester("seq")
@@ -107,6 +110,7 @@ def test_seq_inplace_stage():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_inplace_multi():
     ax = np.full([1024], 0.05, np.float32)
     t = Tester("seq")
@@ -163,6 +167,7 @@ def test_seq_extern_code():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_vec_reduce():
     np.random.seed(1)
     a0 = np.random.normal(-1, 1, [1, 2048, 5120]).astype(np.float32)
@@ -201,6 +206,7 @@ def test_seq_vec_reduce():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_broadcast_store_reuse():
     t = Tester("seq")
     t.seq_add(Tester.K_VEC)
@@ -219,6 +225,7 @@ def test_seq_broadcast_store_reuse():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_seq_reloc_depend():
     """ stage1 dup tiling reloc -> stage 0 output reuse reloc"""
     t = Tester("seq")

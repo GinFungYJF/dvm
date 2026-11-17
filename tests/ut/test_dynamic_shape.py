@@ -64,6 +64,7 @@ def test_implicit_broadcast():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reduce():
     t = Tester('vector:dyn')
     x = t.load([-1], "float32")
@@ -80,6 +81,7 @@ def test_reduce():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reduce_round_tile():
     t = Tester('vector:dyn')
     x = t.load([-1, 2, 4, 3000], "float32")
@@ -94,6 +96,7 @@ def test_reduce_round_tile():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reduce_stuff():
     t = Tester("vector:dyn")
     a = t.load([3, 1280, -1, -1], "float32")
@@ -130,6 +133,7 @@ def test_broadcast():
 
 # llava dynamic shape inference
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_atomic_reduce():
     t = Tester('vector:dyn')
     para0 = t.load([-1], "float16")

@@ -215,7 +215,7 @@ class CodeGenHelper {
       }
       sync_mask_ = (kThreadWiseMask >> op->obj_id_) & 1 ? kThreadWiseMask : 0;
       if (!op->IsStore()) {
-        op->xbuf_ = AllocXBuf(op);
+        op->xbuf_ = AllocOutXBuf(op);
         if (flags & (OBJ_FLAG_WORKSPACE | OBJ_FLAG_XHS)) {
           auto flex = static_cast<FlexOp *>(op);
           if (flex->ws_num_ > 0) {
@@ -293,6 +293,15 @@ class CodeGenHelper {
     uint64_t xbuf = static_xbuf_;
     static_xbuf_ += xbuf_size_;
     return xbuf;
+  }
+  uint64_t AllocOutXBuf(NDObject *op) {
+    if (op->obj_id_ == ObjectType::kReduce && (static_cast<ReduceOp *>(op)->RoundTile().size() & 1u)) {
+      ASSERT(static_xbuf_ + xbuf_size_ <= kernel_.local_mem_size_);
+      uint64_t xbuf = static_xbuf_;
+      static_xbuf_ += xbuf_size_;
+      return xbuf;
+    }
+    return AllocXBuf(op);
   }
   void FreeXBuf(uint64_t xbuf, NDObject *def, NDObject *user) {
     ASSERT((xbuf & kItemSizeMask) == 0);
@@ -1316,7 +1325,7 @@ int64_t VectorKernel::Analyze() {
       peak_live = peak;
     }
     op->xbuf_ = 0;
-    if (!op->IsStore()) {
+    if (!op->IsStore() && op->obj_id_ != kReduce) {
       cur_live--;
     }
   }

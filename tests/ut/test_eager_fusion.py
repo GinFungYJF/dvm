@@ -21,6 +21,7 @@ from tests.mark_utils import arg_mark
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.parametrize('mode', ["eager", "eager:unify_ws", "eager:lazy", "eager:lazy,unify_ws"])
+@pytest.mark.gpu
 def test_eager_split_end(mode):
     ''' reduce -> broad '''
     t = Tester(mode)
@@ -40,6 +41,7 @@ def test_eager_split_end(mode):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_split_middle():
     ''' {broad -> reduce} broad '''
     t = Tester("eager")
@@ -64,6 +66,7 @@ def test_eager_split_middle():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_split_join():
     ''' {Broadcast, Reduce} -> broadcast'''
     t = Tester("eager")
@@ -90,6 +93,7 @@ def test_eager_split_join():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 @pytest.mark.parametrize('shape1, shape2', [
     {(1, 1280, 28, 36), (1, 1280, 1, 1)},  # broadcast
     {(1, 8, 28, 512), (1, 8, 1, 1)},  # broadcast store
@@ -110,6 +114,7 @@ def test_eager_disconnect(shape1, shape2):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_dead_node():
     t = Tester("eager")
     g0 = np.full([32, 512], 0.1, np.float32)
@@ -128,6 +133,7 @@ def test_eager_dead_node():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_split_load():
     t = Tester("eager")
     g0 = np.random.normal(0, 1, (4, 32)).astype(np.float32)
@@ -145,6 +151,7 @@ def test_eager_split_load():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_split_load_reduce():
     t = Tester("eager")
     g0 = np.random.normal(0, 1, (1, 4, 1024)).astype(np.float32)
@@ -159,6 +166,7 @@ def test_eager_split_load_reduce():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_stop_fuse_reduce():
     t = Tester("eager")
     x0_a = np.random.normal(0, 0.1, [428, 16, 8]).astype(np.float32)
@@ -178,6 +186,7 @@ def test_eager_stop_fuse_reduce():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_reduce_multi_user():
     t = Tester("eager")
     x0_a = np.random.normal(0, 0.1, [428, 16, 8]).astype(np.float32)
@@ -325,6 +334,7 @@ def test_eager_extern_code():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_workspace_inplace():
     t = Tester("eager")
     a = np.random.normal(0, 0.1, [128, 1024]).astype(np.float16)
@@ -339,6 +349,7 @@ def test_eager_workspace_inplace():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_load_reuse():
     t = Tester("eager")
     ax = np.random.normal(0, 0.1, [288]).astype(np.float32)
@@ -375,6 +386,7 @@ def test_eager_lazy_tuner():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_pv_1():
     ''' parallel: {V, V} '''
     t = Tester("eager")
@@ -388,6 +400,7 @@ def test_eager_pv_1():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_pv_2():
     ''' parallel: V -> {V, V} '''
     t = Tester("eager")
@@ -404,6 +417,7 @@ def test_eager_pv_2():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_pv_3():
     ''' parallel: V -> {V, V} -> V '''
     t = Tester("eager")
@@ -533,6 +547,7 @@ def test_eager_cv_broadcast(shape_a, shape_b, shape_broadcast):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_pv_multi_parallel_area():
     input0 = np.random.random([2, 3, 4]).astype(np.float32)
     input1 = np.random.random([1]).astype(np.float32)
@@ -578,6 +593,7 @@ def test_eager_many_split():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_reduce_depend():
     t = Tester("eager")
     a = np.random.normal(0, 0.1, [1, 32, 2, 4]).astype(np.float32)
@@ -613,6 +629,7 @@ def test_skip_output(mode):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_store_inplace():
     t = Tester("eager")
     a = np.random.normal(0, 0.1, [64, 128]).astype(np.float32)
@@ -631,6 +648,7 @@ def test_store_inplace():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_select():
     t = Tester("eager")
     a = np.random.normal(0, 0.1, [64, 128]).astype(np.float32)
@@ -650,6 +668,7 @@ def test_select():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_zero_shape_pv():
     t = Tester("eager")
     a = np.full([10, 0, 2], 0.1, np.float32)
@@ -665,6 +684,7 @@ def test_zero_shape_pv():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_zero_shape_reduce():
     t = Tester("eager")
     a = np.full([10, 0, 2], 0.01, np.float32)
@@ -735,6 +755,7 @@ def test_eager_broadcast_s():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_broadcast_reduce_reuse():
     t = Tester("eager")
     a = np.random.normal(0, 0.1, [1, 2000]).astype(np.float32)
@@ -751,6 +772,7 @@ def test_eager_broadcast_reduce_reuse():
     assert(t.run_check())
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
 def test_eager_broadcast_store_reuse():
     t = Tester("eager")
     a0 = np.random.normal(-1, 1, [3000]).astype(np.float32)
