@@ -186,9 +186,12 @@ class VectorKernel : public VKernel {
       code_.threads_ = bt & 0xffffull;
       return bt >> 32;
     }
-#endif
+    uint64_t tile_num = static_cast<uint64_t>(tile_num_);
+    return core_limit < tile_num ? core_limit : tile_num;
+#else
     auto tile_per_block = (tile_num_ + core_limit - 1) / core_limit;
     return (tile_num_ + tile_per_block - 1) / tile_per_block;
+#endif
   }
 
   void InOutReusePlan(const DimArray *dom = nullptr);

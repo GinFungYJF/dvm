@@ -1585,15 +1585,18 @@ __global__ void dvm_vm_gpu(__grid_constant__ const VmParam param) {
   uint64_t *body = reinterpret_cast<uint64_t *>(base_body);
   uint32_t body_tile =
     static_cast<uint32_t>((entry >> V_ENTRY_V_TILE_BODY_OFFSET) & ((1ull << V_ENTRY_V_TILE_BODY_BITS) - 1ull));
-  uint32_t tail_diff =
+  uint32_t tail_blocks =
     static_cast<uint32_t>((entry >> V_ENTRY_V_TILE_TAIL_OFFSET) & ((1ull << V_ENTRY_V_TILE_TAIL_BITS) - 1ull));
+  // The first bnum - tail_blocks blocks handle body_tile tiles, the rest handle body_tile - 1.
+  uint32_t full_blocks = bnum - tail_blocks;
   uint32_t count = body_tile;
   uint32_t tile_begin = bid * body_tile;
+  if (bid >= full_blocks) {
+    count = body_tile - 1;
+    tile_begin = full_blocks * body_tile + (bid - full_blocks) * (body_tile - 1);
+  }
   uint32_t tile_idx = tile_begin;
   bool tail = (bid == bnum - 1);
-  if (tail) {
-    count -= tail_diff;
-  }
 
   while (count != 0) {
     bool is_begin = tile_idx == tile_begin;
@@ -1641,26 +1644,18 @@ uint64_t SelectBlockThread(uint64_t op_num, uint64_t tile_num, uint64_t tile_siz
   constexpr uint64_t kDispatchCost = 1;
   constexpr uint64_t kThreadPenalty = 1;
   constexpr uint64_t kWarpSize = 32;
-  constexpr uint32_t kBlockPenaltyScale = 1024;
-  constexpr uint64_t kBlockPenalty = 100 * kBlockPenaltyScale / 1000;
   const uint32_t sm_num = g_gpu.sm_num;
-  uint32_t max_block_per_sm = std::min(g_gpu.max_block_per_sm, ceil_div(static_cast<uint32_t>(tile_num), sm_num));
-  while (max_block_per_sm > 1 && shared_bytes > g_gpu.budgets[max_block_per_sm - 1].shared_limit) {
-    max_block_per_sm--;
-  }
-  const uint64_t max_blocks = static_cast<uint64_t>(sm_num) * max_block_per_sm;
-  const uint64_t target_blocks = ceil_div(tile_num, ceil_div(tile_num, max_blocks));
   const uint64_t tile_size_align = ceil_div(tile_size, THREAD_ORDER_STEP) * THREAD_ORDER_STEP;
   uint64_t best_cost = static_cast<uint64_t>(-1);
   uint64_t best_block_num = 0;
   uint64_t best_thread = 0;
-  for (uint32_t i = 0; i < max_block_per_sm; ++i) {
-    uint64_t tile_per_block = ceil_div(tile_num, static_cast<uint64_t>(sm_num * (i + 1)));
-    uint64_t block_num = ceil_div(tile_num, tile_per_block);
-    uint64_t block_cost = (kBlockPenaltyScale + kBlockPenalty * kBlockPenaltyScale * (target_blocks - block_num) / target_blocks) * tile_per_block;
+  uint32_t max_block_per_sm = std::min(g_gpu.max_block_per_sm, ceil_div(static_cast<uint32_t>(tile_num), sm_num));
+  for (uint32_t i = 0; i < max_block_per_sm && shared_bytes <= g_gpu.budgets[i].shared_limit; ++i) {
+    uint64_t block_num = std::min(static_cast<uint64_t>(sm_num) * (i + 1), tile_num);
+    uint64_t tile_per_block = ceil_div(tile_num, block_num);
     uint64_t max_threads = std::min(static_cast<uint64_t>(g_gpu.budgets[i].max_threads), tile_size_align);
     for (uint64_t threads = THREAD_ORDER_STEP; threads <= max_threads; threads *= 2) {
-      uint64_t cost = (op_num * (ceil_div(tile_size, threads) + kDispatchCost) + kThreadPenalty * threads / kWarpSize) * block_cost;
+      uint64_t cost = (op_num * (ceil_div(tile_size, threads) + kDispatchCost) + kThreadPenalty * threads / kWarpSize) * tile_per_block;
       if (cost < best_cost || (cost == best_cost && block_num > best_block_num)) {
         best_cost = cost;
         best_block_num = block_num;

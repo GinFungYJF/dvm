@@ -2391,7 +2391,7 @@ struct vVisitMix {
 //  cube_mix(1) << 3 | type(3)
 // data:
 //  cube: reserved(32) << 32 | common(32)
-//  vector:   tile_body(24) << 40 | tail_tail(8) << 32 | common(32)
+//  vector: tile_body(24) << 40 | tail_tail(12) << 28 | reserved(8) << 20 | common(20)
 //  vectorEx: visit_offset_8B(16) << 48 | visit_id(16) << 32 | common(32)
 //  parallel: aiv_lookup(16) << 48 | aic_lookup(16) << 32 | common(32)
 
@@ -2406,9 +2406,8 @@ struct vVisitMix {
 #define V_ENTRY_CODE_SIZE_OFFSET 8
 #define V_ENTRY_CODE_SIZE_BITS 12
 
-// vector
-#define V_ENTRY_V_TILE_TAIL_OFFSET 32
-#define V_ENTRY_V_TILE_TAIL_BITS 8
+#define V_ENTRY_V_TILE_TAIL_OFFSET 28
+#define V_ENTRY_V_TILE_TAIL_BITS 12
 #define V_ENTRY_V_TILE_BODY_OFFSET 40
 #define V_ENTRY_V_TILE_BODY_BITS 24
 
