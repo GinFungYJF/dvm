@@ -145,6 +145,10 @@ void CubeKernel::Clone(VKernel *base, CloneHelper &helper) {
     static_cast<GmmOp *>(cube)->group_list_->CloneUpdate(helper);
   }
   cube_op_ = static_cast<CubeOp *>(cube->CloneUpdate(helper));
+  if (cube->output_) {
+    cube_op_->output_ = static_cast<NDAccess *>(cube->output_->CloneUpdate(helper));
+    cube_op_->output_->flags_ = cube->output_->flags_;
+  }
   reload_rhs_ = k->reload_rhs_;
 }
 
@@ -1168,17 +1172,17 @@ void ParallelKernel::Clone(VKernel *base, CloneHelper &helper) {
   auto k = static_cast<ParallelKernel*>(base);
   for (auto &n : k->vectors_) {
     auto clone = new VKernelS(n.kernel->Flags());
-    n.kernel->Clone(clone, helper);
+    clone->Clone(n.kernel, helper);
     vectors_.emplace_back(clone, n.core_limit);
   }
   for (auto &n : k->cubes_) {
     auto clone = new CubeKernel(KernelType::kCube, n.kernel->Flags());
-    n.kernel->Clone(clone, helper);
+    clone->Clone(n.kernel, helper);
     cubes_.emplace_back(clone, n.core_limit);
   }
   for (auto &n : k->mixes_) {
     auto clone = new MixKernelBase(KernelType::kMix, n.kernel->Flags());
-    n.kernel->Clone(clone, helper);
+    clone->Clone(n.kernel, helper);
     mixes_.emplace_back(clone, n.core_limit);
   }
 }
