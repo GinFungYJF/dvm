@@ -34,6 +34,19 @@ def test_dead_intermediate_store_is_eliminated():
 
 
 @CUDA
+def test_large_outputs_stay_in_one_graph():
+    x = torch.ones(1 << 25, device="cuda", dtype=torch.float32)
+    with fused():
+        dvm_torch.reset_stats()
+        actual = (x + 1) * 2 + 3
+    stats = dvm_torch.stats()
+    assert stats["flushes"] == 1
+    assert stats["by_reason"].get("GraphTooLarge", 0) == 0
+    assert stats["stores_skipped"] == 2
+    torch.testing.assert_close(actual, torch.full_like(x, 7))
+
+
+@CUDA
 def test_graph_with_only_dead_outputs_is_discarded():
     x, y = [torch.randn(1024, device="cuda") for _ in range(2)]
     with eager():

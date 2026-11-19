@@ -54,22 +54,12 @@ const char *FlushReasonName(FlushReason reason);
 
 struct TrimPolicy {
   size_t max_ops = 512;
-  size_t max_bytes = 256ull << 20;
   size_t pending_ops = 0;
-  size_t pending_bytes = 0;
   size_t check_interval = 64;
 
-  bool ShouldTrim() const {
-    return pending_ops >= max_ops || pending_bytes >= max_bytes;
-  }
-  void OnEmit(size_t out_bytes) {
-    ++pending_ops;
-    pending_bytes += out_bytes;
-  }
-  void Reset() {
-    pending_ops = 0;
-    pending_bytes = 0;
-  }
+  bool ShouldTrim() const { return pending_ops >= max_ops; }
+  void OnEmit() { ++pending_ops; }
+  void Reset() { pending_ops = 0; }
 };
 
 dvm::DataType ToDvmDtype(at::ScalarType t);

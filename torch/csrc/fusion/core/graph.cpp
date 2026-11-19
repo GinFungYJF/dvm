@@ -125,7 +125,7 @@ void GraphKernel::RecordStore(const at::Tensor &t, dvm::NDObject *value, bool in
   pending_stores_.push_back(PendingStore{SideTable::StorageOf(t), value, inplace});
   has_pending_ = true;
   ++emitted_ops_;
-  trim_.OnEmit(static_cast<size_t>(t.numel()) * t.element_size());
+  trim_.OnEmit();
 }
 
 void GraphKernel::Write(const at::Tensor &out, dvm::NDObject *value) {

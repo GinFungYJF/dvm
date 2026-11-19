@@ -147,9 +147,7 @@ bool Prepare(const OpKey &key, const std::vector<at::Tensor> &inputs, GraphKerne
     }
   }
   GraphKernel *k = gm.Get();
-  // Both bounds matter: the op count catches long chains, the byte count catches
-  // a few very large tensors. Without the byte bound a long chain keeps every
-  // output storage alive and exhausts device memory.
+  // Bound graph growth by op count and the runtime's dependency-mask capacity.
   if (k->PendingCount() >= kMaxGraphOps || k->ShouldTrim()) {
     gm.Flush(FlushReason::kGraphTooLarge);
     k = gm.Get();
