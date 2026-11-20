@@ -17,6 +17,8 @@ Each test targets a case that produced silently wrong numbers or a stuck graph,
 so they assert on dtype and on counters as well as on values.
 """
 
+import gc
+
 import pytest
 import torch
 
@@ -159,3 +161,62 @@ def test_host_read_of_pending_scalar():
     expected = (a.clone() * 2)[0].item()
     assert value == expected, "host read returned {} not {}".format(value, expected)
     assert dvm_torch.stats()["flushes"] >= 1
+
+
+@CUDA
+def test_empty_flush_releases_loads_from_failed_emitter():
+    """A failed scalar conversion leaves a load but no output to materialise."""
+    dvm_torch.disable()
+    gc.collect()
+    torch.cuda.synchronize()
+    allocated_before = torch.cuda.memory_allocated()
+    x = torch.ones(1 << 20, device="cuda")
+    input_bytes = x.nbytes
+    with fused():
+        with pytest.raises(RuntimeError, match="cannot be converted"):
+            torch.clamp(x, min=1 + 2j)
+        del x
+        gc.collect()
+        assert torch.cuda.memory_allocated() >= allocated_before + input_bytes
+        dvm_torch.flush()
+        assert torch.cuda.memory_allocated() == allocated_before
+        # A second empty flush must also allow a fresh graph to execute.
+        dvm_torch.flush()
+        actual = torch.ones(32, device="cuda") * 3
+    assert_same(actual, torch.full_like(actual, 3))
+
+
+@CUDA
+def test_empty_flush_boundaries_preserve_next_graph():
+    x = torch.arange(128, device="cuda", dtype=torch.float32)
+    expected_first = (x + 1) * 2
+    with fused():
+        dvm_torch.reset_stats()
+        first = (x + 1) * 2
+        dvm_torch.flush()
+        for _ in range(8):
+            dvm_torch.flush()
+        stats = dvm_torch.stats()
+        assert stats["flushes"] == 1
+        assert stats["emitted"] == 2
+        x.fill_(7)
+        second = (x + 1) * 2
+        dvm_torch.flush()
+        assert dvm_torch.stats()["graph_sizes"] == {2: 2}
+    assert_same(first, expected_first)
+    assert_same(second, torch.full_like(second, 16))
+
+
+@CUDA
+def test_inplace_flushes_pending_read_operand():
+    x = torch.arange(128, device="cuda", dtype=torch.float32)
+    destination = torch.ones_like(x)
+    expected = destination + x * 2
+    with fused():
+        dvm_torch.reset_stats()
+        pending = x * 2
+        destination.add_(pending)
+        assert dvm_torch.stats()["flushes"] == 1
+        dvm_torch.flush()
+        assert dvm_torch.stats()["graph_sizes"] == {1: 2}
+    assert_same(destination, expected)

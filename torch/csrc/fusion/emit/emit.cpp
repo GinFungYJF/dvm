@@ -49,13 +49,28 @@ at::Tensor AllocateLike(const std::vector<int64_t> &shape, at::ScalarType dtype,
   return GetAdapter().Allocate(at::IntArrayRef(shape), opts);
 }
 
-bool CanBroadcast(const at::Tensor &a, const at::Tensor &b) {
+std::optional<std::vector<int64_t>> TryBroadcastShape(const at::Tensor &a, const at::Tensor &b) {
   try {
-    (void)at::infer_size(a.sizes(), b.sizes());
-    return true;
+    return at::infer_size(a.sizes(), b.sizes());
   } catch (const c10::Error &) {
-    return false;
+    return std::nullopt;
   }
+}
+
+dvm::NDObject *DivideByScalar(dvm::Kernel &kernel, dvm::NDObject *input,
+                              float divisor, at::ScalarType dtype) {
+  // A power of two has an exact reciprocal. Require the divisor and reciprocal
+  // to be normal, and limit the rewrite to FP32 to avoid constant narrowing.
+  if (dtype == at::kFloat && std::isnormal(divisor)) {
+    int exponent;
+    if (std::abs(std::frexp(divisor, &exponent)) == 0.5f) {
+      const float reciprocal = 1.0f / divisor;
+      if (std::isnormal(reciprocal)) {
+        return kernel.Binary<dvm::kMul>(input, reciprocal);
+      }
+    }
+  }
+  return kernel.Binary<dvm::kDiv>(input, divisor);
 }
 
 /**
@@ -66,6 +81,15 @@ bool CanBroadcast(const at::Tensor &a, const at::Tensor &b) {
  * the result.
  */
 bool ScalarTypeIsFusable(const at::Tensor &t) { return IsFloatDtype(t); }
+
+bool EligibleBool(const at::Tensor &t) {
+  return t.defined() && t.is_cuda() && t.is_contiguous() && t.dim() <= 10 &&
+         t.scalar_type() == at::kBool && t.numel() != 0;
+}
+
+bool EligibleComparison(const at::Tensor &t) {
+  return EligibleBool(t) || (Eligible(t) && IsFloatDtype(t) && t.numel() != 0);
+}
 
 }  // namespace
 
@@ -105,11 +129,6 @@ bool IsFloatDtype(const at::Tensor &t) {
 
 bool IsIntegerDtype(const at::Tensor &t) { return t.scalar_type() == at::kInt; }
 
-std::vector<int64_t> BroadcastShape(const at::Tensor &a, const at::Tensor &b) {
-  auto sizes = at::infer_size(a.sizes(), b.sizes());
-  return std::vector<int64_t>(sizes.begin(), sizes.end());
-}
-
 EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
                       const at::Tensor &b) {
   if (!Eligible(a) || !Eligible(b)) {
@@ -123,10 +142,10 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
     // ATen true division on integers produces float32; the VM would truncate.
     return std::nullopt;
   }
-  if (!CanBroadcast(a, b)) {
+  auto out_shape = TryBroadcastShape(a, b);
+  if (!out_shape) {
     return std::nullopt;
   }
-  std::vector<int64_t> out_shape = BroadcastShape(a, b);
 
   dvm::NDObject *la = ctx.k->Read(a);
   dvm::NDObject *lb = ctx.k->Read(b);
@@ -153,7 +172,7 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
     res = kernel.Select(nan, la, res);
   }
 
-  at::Tensor out = AllocateLike(out_shape, a.scalar_type(), a);
+  at::Tensor out = AllocateLike(*out_shape, a.scalar_type(), a);
   ctx.k->Write(out, res);
   ctx.k->AppendSignature(ctx.op_name);
   return out;
@@ -166,14 +185,14 @@ EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &
   }
   // A Python scalar does not participate in dtype promotion: `fp16 * 2.0` stays
   // fp16, so the constant is materialised at the tensor's own dtype.
-  const float constant = b.to<float>();
+  const float constant = b.isFloatingPoint() ? static_cast<float>(b.to<double>()) : b.to<float>();
   dvm::NDObject *la = ctx.k->Read(a);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {
       case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(la, constant);
       case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(la, constant);
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(la, constant);
-      case dvm::kDiv: return ctx.k->GetKernel().Binary<dvm::kDiv>(la, constant);
+      case dvm::kDiv: return DivideByScalar(ctx.k->GetKernel(), la, constant, a.scalar_type());
       case dvm::kMaximum: return ctx.k->GetKernel().Binary<dvm::kMaximum>(la, constant);
       case dvm::kMinimum: return ctx.k->GetKernel().Binary<dvm::kMinimum>(la, constant);
       case dvm::kPow: return ctx.k->GetKernel().Binary<dvm::kPow>(la, constant);
@@ -213,6 +232,74 @@ EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scala
   std::vector<int64_t> out_shape(b.sizes().begin(), b.sizes().end());
   at::Tensor out = AllocateLike(out_shape, b.scalar_type(), b);
   ctx.k->Write(out, res);
+  ctx.k->AppendSignature(ctx.op_name);
+  return out;
+}
+
+EmitResult EmitEq(EmitCtx &ctx, const at::Tensor &a, const at::Tensor &b) {
+  if (!EligibleComparison(a) || !EligibleComparison(b) || a.device() != b.device() ||
+      a.scalar_type() != b.scalar_type()) {
+    return std::nullopt;
+  }
+  auto shape = TryBroadcastShape(a, b);
+  if (!shape) {
+    return std::nullopt;
+  }
+  auto *left = ctx.k->Read(a);
+  auto *right = ctx.k->Read(b);
+  auto *result = ctx.k->GetKernel().Binary<dvm::kEqual>(left, right);
+  at::Tensor out = AllocateLike(*shape, at::kBool, a);
+  ctx.k->Write(out, result);
+  ctx.k->AppendSignature(ctx.op_name);
+  return out;
+}
+
+EmitResult EmitEqScalar(EmitCtx &ctx, const at::Tensor &a, const at::Scalar &b) {
+  if (!EligibleComparison(a) || b.isComplex()) {
+    return std::nullopt;
+  }
+  // Encoding a non-Boolean scalar as bool would change comparisons such as
+  // True == 2. Let ATen handle promotion outside the exact 0/1 cases.
+  if (a.scalar_type() == at::kBool && b.to<double>() != 0.0 && b.to<double>() != 1.0) {
+    return std::nullopt;
+  }
+  // Comparisons narrow floating scalars without the overflow check used by
+  // fill operations; a very large scalar compares as infinity in FP32/FP16.
+  const float value = b.isFloatingPoint() ? static_cast<float>(b.to<double>()) : b.to<float>();
+  auto *result = ctx.k->GetKernel().Binary<dvm::kEqual>(ctx.k->Read(a), value);
+  at::Tensor out = AllocateLike(std::vector<int64_t>(a.sizes().begin(), a.sizes().end()),
+                                at::kBool, a);
+  ctx.k->Write(out, result);
+  ctx.k->AppendSignature(ctx.op_name);
+  return out;
+}
+
+EmitResult EmitMaskedFill(EmitCtx &ctx, const at::Tensor &self, const at::Tensor &mask,
+                          const at::Scalar &value, bool inplace) {
+  if (!Eligible(self) || !IsFloatDtype(self) || self.numel() == 0 || !EligibleBool(mask) ||
+      self.device() != mask.device() || value.isComplex()) {
+    return std::nullopt;
+  }
+  auto shape = TryBroadcastShape(self, mask);
+  if (!shape || (inplace && at::IntArrayRef(*shape) != self.sizes())) {
+    return std::nullopt;
+  }
+  // Preserve ATen's checked narrowing (e.g. finite 1e9 cannot fill an FP16 tensor).
+  const float fill = self.scalar_type() == at::kHalf ? static_cast<float>(value.to<at::Half>()) :
+                     self.scalar_type() == at::kBFloat16 ? static_cast<float>(value.to<at::BFloat16>()) :
+                     value.to<float>();
+  auto &kernel = ctx.k->GetKernel();
+  auto *input = ctx.k->Read(self);
+  auto *condition = ctx.k->Read(mask);
+  auto *constant = kernel.Broadcast(fill, dvm::Kernel::GetShape(input), ToDvmDtype(self.scalar_type()));
+  auto *result = kernel.Select(condition, constant, input);
+  if (inplace) {
+    ctx.k->WriteInplace(self, result);
+    ctx.k->AppendSignature(std::string(ctx.op_name) + "!");
+    return self;
+  }
+  at::Tensor out = AllocateLike(*shape, self.scalar_type(), self);
+  ctx.k->Write(out, result);
   ctx.k->AppendSignature(ctx.op_name);
   return out;
 }
@@ -258,9 +345,10 @@ EmitResult EmitNeg(EmitCtx &ctx, const at::Tensor &a) {
   if (!Eligible(a)) {
     return std::nullopt;
   }
-  // There is no unary minus in the VM; express it as 0 - x.
+  // Scalar-left subtraction lowers to a multiply followed by an add of zero.
+  // A direct multiply avoids that add and preserves the sign of zero.
   dvm::NDObject *la = ctx.k->Read(a);
-  dvm::NDObject *res = ctx.k->GetKernel().Binary<dvm::kSub>(0.0f, la);
+  dvm::NDObject *res = ctx.k->GetKernel().Binary<dvm::kMul>(la, -1.0f);
   std::vector<int64_t> out_shape(a.sizes().begin(), a.sizes().end());
   at::Tensor out = AllocateLike(out_shape, a.scalar_type(), a);
   ctx.k->Write(out, res);
@@ -436,12 +524,10 @@ EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
   if (self.scalar_type() != other.scalar_type()) {
     return std::nullopt;
   }
-  if (!CanBroadcast(self, other)) {
-    return std::nullopt;
-  }
   // An in-place result must keep the destination shape: broadcasting self up
   // would change it.
-  if (BroadcastShape(self, other) != std::vector<int64_t>(self.sizes().begin(), self.sizes().end())) {
+  auto shape = TryBroadcastShape(self, other);
+  if (!shape || at::IntArrayRef(*shape) != self.sizes()) {
     return std::nullopt;
   }
 
@@ -478,7 +564,7 @@ EmitResult EmitBinaryInplaceScalar(EmitCtx &ctx, dvm::BinaryType op, at::Tensor 
       case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(ls, constant);
       case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(ls, constant);
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(ls, constant);
-      case dvm::kDiv: return ctx.k->GetKernel().Binary<dvm::kDiv>(ls, constant);
+      case dvm::kDiv: return DivideByScalar(ctx.k->GetKernel(), ls, constant, self.scalar_type());
       default: return nullptr;
     }
   }();

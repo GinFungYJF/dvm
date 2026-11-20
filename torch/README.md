@@ -73,6 +73,18 @@ Fusible operators with handwritten unboxed wrappers:
 `sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `clamp` `round` `floor`
 `ceil` `trunc` `sum` `mean`, plus `add_` `sub_` `mul_` `div_` `relu_`.
 
+`mul.Scalar` is covered as well as `mul.Tensor`. `eq.Tensor` / `eq.Scalar`
+accept matching floating-point or Bool inputs; Bool scalar comparisons fuse for
+0 and 1. `masked_fill.Scalar` / `masked_fill_.Scalar` accept floating-point data
+and a broadcastable Bool mask. These paths require nonempty contiguous CUDA
+inputs; mixed dtypes, integer comparisons, Tensor fill values and unsupported
+layouts fall back to native kernels.
+
+`detach` preserves pending computation while calling the native metadata operation,
+so storage aliases and version counters retain PyTorch semantics. Writes through
+detached aliases and consumers that require materialized data still flush as
+needed. Use `disable_ops="detach"` to retain a flush at detach calls.
+
 Other ATen operators use a generic guard: **flush first, then forward to the original
 kernel captured before registration**.
 
@@ -85,6 +97,9 @@ Known limitations:
   `int32 / 2` to float32, which the VM cannot express while preserving those semantics.
 - Reductions with empty, integer, or FP64 inputs, unsupported output dtypes,
   noncontiguous inputs, or deterministic algorithms enabled use native kernels.
+- `sum` joins fusion only when its input is produced by the current pending graph.
+  A sum over an already materialized tensor uses the native kernel, including
+  when it would otherwise start a chain with later operators. `mean` is unchanged.
 - `sum.out`, `mean.out`, and other reductions such as `amax` / `amin` execute after
   the generic guard flushes the pending graph.
 - `tanh` / `sigmoid` are synthesized from `exp`. `tanh` fusion is disabled by default

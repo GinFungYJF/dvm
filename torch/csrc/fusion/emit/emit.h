@@ -48,15 +48,16 @@ bool IsIntegerDtype(const at::Tensor &t);
 /** True for a 0-dim CPU tensor, which is how Python scalars reach the dispatcher. */
 bool IsWrappedScalar(const at::Tensor &t);
 
-/** Broadcasting output shape of two tensors, mirroring torch semantics. */
-std::vector<int64_t> BroadcastShape(const at::Tensor &a, const at::Tensor &b);
-
 EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a, const at::Tensor &b);
 /** Scalar operand form: `x * 2.0`, `x + 1`, ... */
 EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
                             const at::Scalar &b);
 EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
                                const at::Tensor &b);
+EmitResult EmitEq(EmitCtx &ctx, const at::Tensor &a, const at::Tensor &b);
+EmitResult EmitEqScalar(EmitCtx &ctx, const at::Tensor &a, const at::Scalar &b);
+EmitResult EmitMaskedFill(EmitCtx &ctx, const at::Tensor &self, const at::Tensor &mask,
+                          const at::Scalar &value, bool inplace);
 EmitResult EmitUnary(EmitCtx &ctx, dvm::UnaryType op, const at::Tensor &a);
 EmitResult EmitNeg(EmitCtx &ctx, const at::Tensor &a);
 EmitResult EmitRelu(EmitCtx &ctx, const at::Tensor &a);

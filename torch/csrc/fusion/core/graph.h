@@ -66,7 +66,10 @@ class GraphKernel {
   GraphKernel(const GraphKernel &) = delete;
   GraphKernel &operator=(const GraphKernel &) = delete;
 
-  dvm::Kernel &GetKernel() { return kernel_; }
+  dvm::Kernel &GetKernel() {
+    has_state_ = true;
+    return kernel_;
+  }
 
   /** Node holding this storage's current value; loads from GM if absent. */
   dvm::NDObject *Read(const at::Tensor &t);
@@ -85,6 +88,13 @@ class GraphKernel {
   size_t PendingCount() const { return pending_stores_.size(); }
   bool HasStorage(const at::Tensor &t) const { return table_.ContainsStorage(t); }
   bool IsExactPending(const at::Tensor &t) const { return table_.FindExact(t) != nullptr; }
+  bool HasPendingProducer(const at::Tensor &t) const {
+    const TensorEntry *entry = table_.FindExact(t);
+    return entry != nullptr && entry->needs_store;
+  }
+  bool NeedFlushForInputs(at::TensorList inputs, bool writable) const {
+    return has_pending_ && table_.NeedFlushForInputs(inputs, writable);
+  }
   bool ShouldTrim() const {
     // EagerArea uses a 64-bit dependency mask. Each result can introduce a
     // store area, and each reduction can introduce one additional area.
@@ -114,6 +124,8 @@ class GraphKernel {
   dvm::IntArrayRef *HoldShape(const std::vector<int64_t> &shape);
 
   SideTable table_;
+  // A failed emitter can leave loads or IR without producing a pending store.
+  bool has_state_{false};
   bool has_pending_{false};
   bool in_flush_{false};
   size_t emitted_ops_{0};
@@ -147,8 +159,7 @@ class GraphManager {
   void Discard();
   void Flush(FlushReason reason);
 
-  bool NeedFlushForInput(const at::Tensor &t) const;
-  bool NeedFlushForWritable(const at::Tensor &t) const;
+  bool NeedFlushForInputs(at::TensorList inputs, bool writable = false) const;
   bool HasPending() const;
 
   Stats &GetStats() { return stats_; }

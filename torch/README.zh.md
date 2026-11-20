@@ -66,6 +66,16 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 
 其余 aten 算子注册一条通用守卫：**先 flush 再转发到注册前捕获的原 kernel**。
 
+同时覆盖 `mul.Scalar` 和 `mul.Tensor`。`eq.Tensor` / `eq.Scalar` 支持同类型的
+浮点或 Bool 输入，Bool 与标量比较仅融合 0 和 1。
+`masked_fill.Scalar` / `masked_fill_.Scalar` 支持浮点数据和可广播的 Bool mask。
+这些路径要求输入为非空、连续的 CUDA 张量；混合 dtype、整数比较、Tensor 填充值
+以及不支持的布局回退到原生 kernel。
+
+`detach` 调用原生元数据操作并保留待执行计算，使 storage 别名和版本计数保持
+PyTorch 语义。通过 detached 别名写入以及需要读取实际数据的消费者，仍会按需
+触发 flush。可通过 `disable_ops="detach"` 恢复 detach 处的 flush。
+
 已知边界：
 
 - 融合输入为连续的密集 CUDA 张量，最多 10 维，与 DVM 的形状存储容量一致。
@@ -73,6 +83,8 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 - Python 标量只对浮点张量融合：`int32 / 2` 在 torch 中提升为 float32，
   VM 无法在不改变语义的前提下表达。
 - 空输入、整数或 FP64 归约、其他输出 dtype、非连续输入以及确定性算法模式走原生归约。
+- `sum` 仅在输入由当前待执行图产生时参与融合。对已物化张量的 sum 使用原生
+  kernel，包括原本可以由 sum 开始、再连接后续算子的链。`mean` 不受此限制。
 - `sum.out` / `mean.out` 和 `amax` / `amin` 等其余归约由通用守卫触发 flush 后执行。
 - `tanh` / `sigmoid` 由 `exp` 合成。`tanh` 默认关闭，可由 `compile_fast=True` 启用。
 

@@ -64,6 +64,8 @@ class SideTable {
   const TensorEntry *FindExact(const at::Tensor &t) const;
   /** Storage-only membership: used for write-alias detection. */
   bool ContainsStorage(const at::Tensor &t) const;
+  /** Check read views or writable operands with one lookup per input. */
+  bool NeedFlushForInputs(at::TensorList inputs, bool writable) const;
 
   TensorEntry *Get(const at::Tensor &t);
   TensorEntry *GetByStorage(c10::StorageImpl *s);

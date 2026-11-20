@@ -16,6 +16,14 @@
 #include "fusion/core/side_table.h"
 
 namespace dvm_torch {
+namespace {
+
+bool Matches(const at::Tensor &t, const TensorEntry &e) {
+  return t.storage_offset() == e.offset && t.numel() == e.numel &&
+         t.scalar_type() == e.dtype && t.sizes() == at::IntArrayRef(e.shape);
+}
+
+}  // namespace
 
 c10::StorageImpl *SideTable::StorageOf(const at::Tensor &t) {
   return t.storage().unsafeGetStorageImpl();
@@ -33,8 +41,7 @@ const TensorEntry *SideTable::FindExact(const at::Tensor &t) const {
   const TensorEntry &e = it->second;
   // Partial overlap (view) can neither reuse the node nor be loaded directly;
   // the caller has to flush instead.
-  if (t.storage_offset() != e.offset || t.numel() != e.numel ||
-      t.scalar_type() != e.dtype || t.sizes() != at::IntArrayRef(e.shape)) {
+  if (!Matches(t, e)) {
     return nullptr;
   }
   return &e;
@@ -46,6 +53,20 @@ bool SideTable::ContainsStorage(const at::Tensor &t) const {
   }
   std::shared_lock<std::shared_mutex> lock(mu_);
   return map_.find(StorageOf(t)) != map_.end();
+}
+
+bool SideTable::NeedFlushForInputs(at::TensorList inputs, bool writable) const {
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  for (const auto &t : inputs) {
+    if (!t.defined() || !t.has_storage()) {
+      continue;
+    }
+    auto it = map_.find(StorageOf(t));
+    if (it != map_.end() && (writable || !Matches(t, it->second))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 TensorEntry *SideTable::Get(const at::Tensor &t) {

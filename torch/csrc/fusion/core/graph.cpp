@@ -56,6 +56,7 @@ GraphKernel::GraphKernel() { kernel_.Reset(dvm::kEager, dvm::kUnifyWS); }
 GraphKernel::~GraphKernel() = default;
 
 void GraphKernel::AppendSignature(const std::string &op) {
+  has_state_ = true;
   if (!signature_.empty()) {
     signature_.push_back(';');
   }
@@ -63,6 +64,7 @@ void GraphKernel::AppendSignature(const std::string &op) {
 }
 
 dvm::IntArrayRef *GraphKernel::HoldShape(const std::vector<int64_t> &shape) {
+  has_state_ = true;
   auto data = std::make_unique<std::vector<int64_t>>(shape);
   auto ref = std::make_unique<dvm::IntArrayRef>(data->data(), data->size());
   dvm::IntArrayRef *raw = ref.get();
@@ -72,6 +74,7 @@ dvm::IntArrayRef *GraphKernel::HoldShape(const std::vector<int64_t> &shape) {
 }
 
 dvm::NDObject *GraphKernel::LoadStorage(const at::Tensor &t, TensorEntry &e) {
+  has_state_ = true;
   const auto dtype = ToDvmDtype(t.scalar_type());
   std::vector<int64_t> shape(t.sizes().begin(), t.sizes().end());
   dvm::NDObject *node = kernel_.Load(t.data_ptr(), HoldShape(shape), dtype);
@@ -108,6 +111,7 @@ dvm::NDObject *GraphKernel::ReduceSum(dvm::NDObject *input, const std::vector<in
 }
 
 void GraphKernel::RecordStore(const at::Tensor &t, dvm::NDObject *value, bool inplace) {
+  has_state_ = true;
   TensorEntry &e = table_.Upsert(t);
   e.value = value;
   e.needs_store = true;
@@ -137,12 +141,14 @@ void GraphKernel::WriteInplace(const at::Tensor &self, dvm::NDObject *value) {
 }
 
 bool GraphKernel::Flush(void *stream, Stats *stats) {
-  if (!has_pending_ || pending_stores_.empty()) {
-    Reset();
-    return false;
-  }
   if (in_flush_) {
     // Re-entrant flush from the allocator: leave the graph alone.
+    return false;
+  }
+  if (!has_pending_ || pending_stores_.empty()) {
+    if (has_state_) {
+      Reset();
+    }
     return false;
   }
   in_flush_ = true;
@@ -232,6 +238,7 @@ void GraphKernel::Reset() {
   shape_refs_.clear();
   table_.Clear();
   signature_.clear();
+  has_state_ = false;
   has_pending_ = false;
   in_flush_ = false;
   emitted_ops_ = 0;
@@ -296,24 +303,9 @@ bool GraphManager::HasPending() const {
   return current_ != nullptr && !current_->Empty();
 }
 
-bool GraphManager::NeedFlushForInput(const at::Tensor &t) const {
+bool GraphManager::NeedFlushForInputs(at::TensorList inputs, bool writable) const {
   std::lock_guard<std::recursive_mutex> lock(mu_);
-  if (current_ == nullptr || current_->Empty()) {
-    return false;
-  }
-  if (!current_->HasStorage(t)) {
-    return false;
-  }
-  // Same storage but not the whole tensor: a view, which cannot reuse the node.
-  return !current_->IsExactPending(t);
-}
-
-bool GraphManager::NeedFlushForWritable(const at::Tensor &t) const {
-  std::lock_guard<std::recursive_mutex> lock(mu_);
-  if (current_ == nullptr || current_->Empty()) {
-    return false;
-  }
-  return current_->HasStorage(t);
+  return current_ != nullptr && current_->NeedFlushForInputs(inputs, writable);
 }
 
 std::map<FlushReason, size_t> GraphManager::ReasonTotals() const {

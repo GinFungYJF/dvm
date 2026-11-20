@@ -37,6 +37,12 @@ namespace dvm_torch {
  */
 EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
                           const at::Tensor &b);
+EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
+                                const at::Scalar &b);
+EmitResult DispatchEq(const OpKey &key, const at::Tensor &a, const at::Tensor &b);
+EmitResult DispatchEqScalar(const OpKey &key, const at::Tensor &a, const at::Scalar &b);
+EmitResult DispatchMaskedFill(const OpKey &key, const at::Tensor &self, const at::Tensor &mask,
+                              const at::Scalar &value, bool inplace);
 EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tensor &self,
                                  const at::Tensor &other);
 EmitResult DispatchUnary(const OpKey &key, dvm::UnaryType op, const at::Tensor &a);

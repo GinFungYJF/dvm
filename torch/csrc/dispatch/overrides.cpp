@@ -113,21 +113,19 @@ void CallOriginalBoxed(const OpKey &key, c10::Stack *stack) {
 }
 
 bool FusionActive() {
+  if (in_native_kernel) {
+    return false;
+  }
   const Flags &f = GetFlags();
-  return !in_native_kernel && f.enabled && f.mode != FusionMode::kOff;
-}
-
-/** Dense CUDA tensor with a dtype the GPU VM can execute. */
-bool Usable(const at::Tensor &t) {
-  return t.defined() && t.is_cuda() && t.is_contiguous() && Eligible(t);
+  return f.enabled && f.mode != FusionMode::kOff;
 }
 
 /**
- * Shared prologue. Returns false when the op must fall back; refusing is free of
- * side effects, which is what lets the caller retry the native kernel.
+ * Shared prologue. Resolve execution and alias boundaries before emission;
+ * emitters check tensor eligibility before constructing any graph nodes.
  */
-bool Prepare(const OpKey &key, const std::vector<at::Tensor> &inputs, GraphKernel **out) {
-  if (!FusionActive() || !OpEnabled(key)) {
+bool Prepare(const OpKey &key, at::TensorList inputs, GraphKernel **out, bool writable = false) {
+  if (in_native_kernel || !OpEnabled(key)) {
     return false;
   }
   GraphManager &gm = GraphManager::Instance();
@@ -140,11 +138,9 @@ bool Prepare(const OpKey &key, const std::vector<at::Tensor> &inputs, GraphKerne
   }
   // A view over a pending storage cannot reuse the node, and a write to any
   // storage the graph has touched has to be resolved against real memory.
-  for (const auto &t : inputs) {
-    if (gm.NeedFlushForInput(t)) {
-      gm.Flush(FlushReason::kWriteAlias);
-      break;
-    }
+  // In-place ops check every operand: the read operand can also be pending.
+  if (gm.NeedFlushForInputs(inputs, writable)) {
+    gm.Flush(FlushReason::kWriteAlias);
   }
   GraphKernel *k = gm.Get();
   // Bound graph growth by op count and the runtime's dependency-mask capacity.
@@ -154,22 +150,6 @@ bool Prepare(const OpKey &key, const std::vector<at::Tensor> &inputs, GraphKerne
   }
   *out = k;
   return true;
-}
-
-bool PrepareWritable(const OpKey &key, const std::vector<at::Tensor> &inputs, GraphKernel **out) {
-  if (!FusionActive() || !OpEnabled(key)) {
-    return false;
-  }
-  GraphManager &gm = GraphManager::Instance();
-  for (const auto &t : inputs) {
-    // Check every tensor, not just `self`: in `a.add_(b)` the read operand b may
-    // itself still be pending.
-    if (gm.NeedFlushForWritable(t) || gm.NeedFlushForInput(t)) {
-      gm.Flush(FlushReason::kWriteAlias);
-      break;
-    }
-  }
-  return Prepare(key, inputs, out);
 }
 
 /** Users write `mul`, not `aten::mul`; accept both forms. */
@@ -209,7 +189,7 @@ void GenericGuard(const c10::OperatorHandle &op, c10::Stack *stack) {
 
 bool OpEnabled(const OpKey &key) {
   const Flags &f = GetFlags();
-  if (!f.enabled) {
+  if (!f.enabled || f.mode == FusionMode::kOff) {
     return false;
   }
   if (!f.enable_ops.empty() && !NameMatches(f.enable_ops, key.name)) {
@@ -231,20 +211,20 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
   // A Python scalar reaches the dispatcher as a 0-dim CPU tensor. It cannot be
   // loaded from device memory, but it folds into an immediate operand.
   if (IsWrappedScalar(b)) {
-    if (!Prepare(key, {a}, &k) || !Usable(a)) {
+    if (!Prepare(key, {a}, &k)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
     return EmitBinaryScalar(ctx, op, a, b.item());
   }
   if (IsWrappedScalar(a)) {
-    if (!Prepare(key, {b}, &k) || !Usable(b)) {
+    if (!Prepare(key, {b}, &k)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
     return EmitBinaryScalarLhs(ctx, op, a.item(), b);
   }
-  if (!Prepare(key, {a, b}, &k) || !Usable(a) || !Usable(b)) {
+  if (!Prepare(key, {a, b}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -256,23 +236,71 @@ EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tenso
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
   if (IsWrappedScalar(other)) {
-    if (!PrepareWritable(key, {self}, &k) || !Usable(self)) {
+    if (!Prepare(key, {self}, &k, true)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
     return EmitBinaryInplaceScalar(ctx, op, self, other.item());
   }
-  if (!PrepareWritable(key, {self, other}, &k) || !Usable(self) || !Usable(other)) {
+  if (!Prepare(key, {self, other}, &k, true)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
   return EmitBinaryInplace(ctx, op, self, other);
 }
 
+EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
+                                const at::Scalar &b) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {a}, &k) || b.isComplex()) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitBinaryScalar(ctx, op, a, b);
+}
+
+EmitResult DispatchEqScalar(const OpKey &key, const at::Tensor &a, const at::Scalar &b) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {a}, &k)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitEqScalar(ctx, a, b);
+}
+
+EmitResult DispatchEq(const OpKey &key, const at::Tensor &a, const at::Tensor &b) {
+  if (IsWrappedScalar(b)) {
+    return DispatchEqScalar(key, a, b.item());
+  }
+  if (IsWrappedScalar(a)) {
+    return DispatchEqScalar(key, b, a.item());
+  }
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {a, b}, &k)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitEq(ctx, a, b);
+}
+
+EmitResult DispatchMaskedFill(const OpKey &key, const at::Tensor &self, const at::Tensor &mask,
+                              const at::Scalar &value, bool inplace) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {self, mask}, &k, inplace)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitMaskedFill(ctx, self, mask, value, inplace);
+}
+
 EmitResult DispatchUnary(const OpKey &key, dvm::UnaryType op, const at::Tensor &a) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -282,7 +310,7 @@ EmitResult DispatchUnary(const OpKey &key, dvm::UnaryType op, const at::Tensor &
 EmitResult DispatchNeg(const OpKey &key, const at::Tensor &a) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -292,7 +320,7 @@ EmitResult DispatchNeg(const OpKey &key, const at::Tensor &a) {
 EmitResult DispatchRelu(const OpKey &key, const at::Tensor &a) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -302,7 +330,7 @@ EmitResult DispatchRelu(const OpKey &key, const at::Tensor &a) {
 EmitResult DispatchRsqrt(const OpKey &key, const at::Tensor &a) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -312,7 +340,7 @@ EmitResult DispatchRsqrt(const OpKey &key, const at::Tensor &a) {
 EmitResult DispatchSigmoid(const OpKey &key, const at::Tensor &a) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -322,7 +350,7 @@ EmitResult DispatchSigmoid(const OpKey &key, const at::Tensor &a) {
 EmitResult DispatchTanh(const OpKey &key, const at::Tensor &a) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   // tanh is synthesised from exp, so it is not bit-exact against ATen, and the
@@ -337,7 +365,7 @@ EmitResult DispatchTanh(const OpKey &key, const at::Tensor &a) {
 EmitResult DispatchPowScalar(const OpKey &key, const at::Tensor &a, double exponent) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -349,7 +377,7 @@ EmitResult DispatchClamp(const OpKey &key, const at::Tensor &a,
                          const std::optional<c10::Scalar> &max) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -359,7 +387,7 @@ EmitResult DispatchClamp(const OpKey &key, const at::Tensor &a,
 EmitResult DispatchReluInplace(const OpKey &key, at::Tensor &self) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!PrepareWritable(key, {self}, &k) || !Usable(self)) {
+  if (!Prepare(key, {self}, &k, true)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -370,7 +398,12 @@ EmitResult DispatchReduction(const OpKey &key, const at::Tensor &a, at::Optional
                              bool keepdim, std::optional<at::ScalarType> dtype, bool mean) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k) || !Usable(a)) {
+  if (!Prepare(key, {a}, &k)) {
+    return std::nullopt;
+  }
+  // Sum only joins a graph that produces its input. Check after Prepare, since
+  // alias, stream, and size boundaries may have materialised that producer.
+  if (!mean && !k->HasPendingProducer(a)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -415,6 +448,52 @@ at::Tensor WrapMulTensor(const at::Tensor &a, const at::Tensor &b) {
   }
   FlushForFallback(FlushReason::kNonFusibleOp);
   return CallOriginal<at::Tensor>(kKey, a, b);
+}
+
+at::Tensor WrapMulScalar(const at::Tensor &a, const at::Scalar &b) {
+  static const OpKey kKey{"aten::mul", "Scalar"};
+  if (auto out = DispatchBinaryScalar(kKey, dvm::kMul, a, b); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, a, b);
+}
+
+at::Tensor WrapDetach(const at::Tensor &a) {
+  static const OpKey kKey{"aten::detach", ""};
+  if (!OpEnabled(kKey)) {
+    FlushForFallback(FlushReason::kNonFusibleOp);
+  }
+  // Detach reads metadata only. Keep the native storage alias and shared version
+  // counter; storage-based lookup and liveness also cover the detached owner.
+  return CallOriginal<at::Tensor>(kKey, a);
+}
+
+at::Tensor WrapEqTensor(const at::Tensor &a, const at::Tensor &b) {
+  static const OpKey kKey{"aten::eq", "Tensor"};
+  if (auto out = DispatchEq(kKey, a, b); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, a, b);
+}
+
+at::Tensor WrapEqScalar(const at::Tensor &a, const at::Scalar &b) {
+  static const OpKey kKey{"aten::eq", "Scalar"};
+  if (auto out = DispatchEqScalar(kKey, a, b); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, a, b);
+}
+
+at::Tensor WrapMaskedFill(const at::Tensor &self, const at::Tensor &mask, const at::Scalar &value) {
+  static const OpKey kKey{"aten::masked_fill", "Scalar"};
+  if (auto out = DispatchMaskedFill(kKey, self, mask, value, false); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, self, mask, value);
 }
 
 at::Tensor WrapDivTensor(const at::Tensor &a, const at::Tensor &b) {
@@ -570,6 +649,20 @@ at::Tensor WrapMeanDim(const at::Tensor &a, at::OptionalIntArrayRef dims, bool k
 
 // ---- in-place -----------------------------------------------------------------
 
+at::Tensor &WrapMaskedFillInplace(at::Tensor &self, const at::Tensor &mask, const at::Scalar &value) {
+  static const OpKey kKey{"aten::masked_fill_", "Scalar"};
+  if (auto out = DispatchMaskedFill(kKey, self, mask, value, true); out.has_value()) {
+    return self;
+  }
+  FlushForFallback(FlushReason::kWriteAlias);
+  c10::Stack stack;
+  stack.push_back(self);
+  stack.push_back(mask);
+  stack.push_back(value);
+  CallOriginalBoxed(kKey, &stack);
+  return self;
+}
+
 at::Tensor &WrapAddInplace(at::Tensor &self, const at::Tensor &other, const at::Scalar &alpha) {
   static const OpKey kKey{"aten::add_", "Tensor"};
   if (alpha.to<double>() == 1.0) {
@@ -659,6 +752,12 @@ void InstallFusibleWrappers() {
   RegisterWrapper(OpKey{"aten::add", "Tensor"}, &WrapAddTensor);
   RegisterWrapper(OpKey{"aten::sub", "Tensor"}, &WrapSubTensor);
   RegisterWrapper(OpKey{"aten::mul", "Tensor"}, &WrapMulTensor);
+  RegisterWrapper(OpKey{"aten::mul", "Scalar"}, &WrapMulScalar);
+  RegisterWrapper(OpKey{"aten::detach", ""}, &WrapDetach);
+  RegisterWrapper(OpKey{"aten::eq", "Tensor"}, &WrapEqTensor);
+  RegisterWrapper(OpKey{"aten::eq", "Scalar"}, &WrapEqScalar);
+  RegisterWrapper(OpKey{"aten::masked_fill", "Scalar"}, &WrapMaskedFill);
+  RegisterWrapper(OpKey{"aten::masked_fill_", "Scalar"}, &WrapMaskedFillInplace);
   RegisterWrapper(OpKey{"aten::div", "Tensor"}, &WrapDivTensor);
   RegisterWrapper(OpKey{"aten::maximum", ""}, &WrapMaximum);
   RegisterWrapper(OpKey{"aten::minimum", ""}, &WrapMinimum);

@@ -45,8 +45,8 @@ def test_reduction_dimensions(name, keepdim, shape, dims):
         expected = fn(x, dim=dims, keepdim=keepdim)
     with fused():
         dvm_torch.reset_stats()
-        actual = fn(x, dim=dims, keepdim=keepdim)
-    assert dvm_torch.stats()["emitted"] == 1
+        actual = fn(x * 1, dim=dims, keepdim=keepdim)
+    assert dvm_torch.stats()["emitted"] == 2
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
 
 
@@ -61,8 +61,8 @@ def test_reduction_dtype(name, dtype, out_dtype):
         expected = fn(x, dim=1, dtype=out_dtype)
     with fused():
         dvm_torch.reset_stats()
-        actual = fn(x, dim=1, dtype=out_dtype)
-    assert dvm_torch.stats()["emitted"] == 1
+        actual = fn(x * 1, dim=1, dtype=out_dtype)
+    assert dvm_torch.stats()["emitted"] == 2
     torch.testing.assert_close(actual, expected)
 
 
@@ -74,8 +74,85 @@ def test_explicit_dtype_casts_before_accumulating(name):
     with eager():
         expected = fn(x, dim=1, dtype=torch.float16)
     with fused():
-        actual = fn(x, dim=1, dtype=torch.float16)
+        actual = fn(x * 1, dim=1, dtype=torch.float16)
     torch.testing.assert_close(actual, expected)
+
+
+@CUDA
+@pytest.mark.parametrize("name", ["sum", "mean"])
+@pytest.mark.parametrize("dims", [None, (0,)])
+def test_standalone_reduction_gating(name, dims):
+    x = torch.randn((32, 257), device="cuda")
+    fn = getattr(torch, name)
+    with eager():
+        expected = fn(x) if dims is None else fn(x, dim=dims)
+    with fused():
+        dvm_torch.reset_stats()
+        actual = fn(x) if dims is None else fn(x, dim=dims)
+    assert dvm_torch.stats()["emitted"] == (0 if name == "sum" else 1)
+    assert dvm_torch.stats()["flushes"] == (0 if name == "sum" else 1)
+    tolerance = 0 if name == "sum" else 1e-4
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
+
+
+@CUDA
+@pytest.mark.parametrize("cached_input", [False, True])
+def test_sum_requires_a_producer_not_an_unrelated_pending_op(cached_input):
+    x = torch.randn((32, 257), device="cuda")
+    other = torch.randn_like(x)
+    source = x if cached_input else other
+    with eager():
+        expected = x.sum(dim=0)
+        product_expected = source * 2
+    with fused():
+        dvm_torch.reset_stats()
+        product = source * 2
+        actual = x.sum(dim=0)
+    assert dvm_torch.stats()["emitted"] == 1
+    torch.testing.assert_close(product, product_expected)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@CUDA
+def test_sum_after_materialising_producer_uses_native_kernel():
+    x = torch.randn((32, 257), device="cuda")
+    with eager():
+        expected = (x * 2).sum(dim=0)
+    with fused():
+        product = x * 2
+        dvm_torch.flush()
+        dvm_torch.reset_stats()
+        actual = product.sum(dim=0)
+    assert dvm_torch.stats()["emitted"] == 0
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@CUDA
+def test_sum_rechecks_producer_after_graph_trim():
+    x = torch.ones((8, 33), device="cuda")
+    with fused():
+        dvm_torch.reset_stats()
+        pending = x
+        for _ in range(62):
+            pending = pending + 1
+        actual = pending.sum(dim=0)
+    assert dvm_torch.stats()["emitted"] == 62
+    assert dvm_torch.stats()["by_reason"]["GraphTooLarge"] == 1
+    torch.testing.assert_close(actual, (x + 62).sum(dim=0), rtol=0, atol=0)
+
+
+@CUDA
+def test_sum_of_inplace_result_fuses():
+    x = torch.randn((32, 257), device="cuda")
+    with eager():
+        expected = (x + 1).sum(dim=0)
+    with fused():
+        dvm_torch.reset_stats()
+        x.add_(1)
+        actual = x.sum(dim=0)
+    assert dvm_torch.stats()["emitted"] == 2
+    assert dvm_torch.stats()["flushes"] == 1
+    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
 
 
 @CUDA
@@ -218,8 +295,8 @@ def test_deterministic_reduction_uses_native_kernel():
             expected = x.sum(dim=0)
         with fused():
             dvm_torch.reset_stats()
-            actual = x.sum(dim=0)
-        assert dvm_torch.stats()["emitted"] == 0
+            actual = (x * 1).sum(dim=0)
+        assert dvm_torch.stats()["emitted"] == 1
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     finally:
         torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
@@ -234,8 +311,8 @@ def test_reduction_disable_ops(name):
         expected = fn(x)
     with fused(disable_ops=name):
         dvm_torch.reset_stats()
-        actual = fn(x)
-    assert dvm_torch.stats()["emitted"] == 0
+        actual = fn(x * 1)
+    assert dvm_torch.stats()["emitted"] == 1
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
@@ -245,8 +322,8 @@ def test_reduction_rank_limit(rank):
     x = torch.ones((2,) * rank, device="cuda")
     with fused():
         dvm_torch.reset_stats()
-        actual = x.sum(dim=-1)
-    assert dvm_torch.stats()["emitted"] == (1 if rank == 10 else 0)
+        actual = (x * 1).sum(dim=-1)
+    assert dvm_torch.stats()["emitted"] == (2 if rank == 10 else 0)
     torch.testing.assert_close(actual, x.sum(dim=-1))
 
 
@@ -258,7 +335,8 @@ def test_many_reduction_branches_trim_and_resume():
     with fused():
         dvm_torch.reset_stats()
         actual = [(x + i).sum(dim=0) * 0.5 for i in range(80)]
-    assert dvm_torch.stats()["emitted"] == 240
+    # A trim can materialise a producer before its sum is considered for fusion.
+    assert 160 < dvm_torch.stats()["emitted"] <= 240
     assert dvm_torch.stats()["by_reason"]["GraphTooLarge"] > 0
     torch.testing.assert_close(actual, expected)
 
@@ -300,5 +378,5 @@ def test_reduction_nonfinite_values(name):
     with eager():
         expected = fn(x, dim=1)
     with fused():
-        actual = fn(x, dim=1)
+        actual = fn(x * 1, dim=1)
     torch.testing.assert_close(actual, expected, equal_nan=True)
