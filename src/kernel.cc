@@ -1574,9 +1574,108 @@ void VKernelS::SchInit(const std::vector<NDObject *> &objects) {
   }
 }
 
-static inline void SetPdHead(NDObject *op, NDObject *head) { op->insn_ = reinterpret_cast<uint64_t *>(head); }
-static inline NDObject *GetPdHead(NDObject *op) { return reinterpret_cast<NDObject *>(op->insn_); }
-static inline bool IsBroker(NDObject *op) { return op->obj_id_ == kReshape; }
+namespace {
+inline void SetPdHead(NDObject *op, NDObject *head) { op->insn_ = reinterpret_cast<uint64_t *>(head); }
+inline NDObject *GetPdHead(NDObject *op) { return reinterpret_cast<NDObject *>(op->insn_); }
+inline bool IsBroker(NDObject *op) { return op->obj_id_ == kReshape; }
+
+bool ResolveBrokerDiamond(std::vector<NDObject *> &objects, int prop_num) {
+  struct _Redirector final : public CloneHelper {
+    NDObject *GetClone(NDObject *op) override {
+      auto it = map_.find(op);
+      if (it != map_.end()) {
+        return it->second;
+      }
+      auto clone = op->IsLoad() ? static_cast<NDAccess *>(op)->CloneBind() : op->Clone(*this);
+      map_[op] = clone;
+      pending_.push_back(clone);
+      return clone;
+    }
+    IntArrayRef *GetClone(IntArrayRef *shape) override { return shape; }
+    ScalarRef *GetClone(ScalarRef *scalar) override { return scalar; }
+    void SetClone(NDObject *op, NDObject *clone) override { map_[op] = clone; }
+
+    void Run(NDObject *broker, std::vector<NDObject *> &ops) {
+      auto clone = GetClone(broker->lhs_);
+      size_t pos = static_cast<size_t>(broker->index_);
+      ASSERT(pos < ops.size() && ops[pos] == broker);
+      ops.insert(ops.begin() + pos, pending_.begin(), pending_.end());
+      broker->lhs_ = clone;
+    }
+    std::unordered_map<NDObject *, NDObject *> map_;
+    std::vector<NDObject *> pending_;
+  };
+
+  ASSERT(prop_num <= 64);
+  struct Region {
+    uint64_t desc{0};
+    NDObject *out_head{nullptr};
+    NDObject *out_tail{nullptr};
+  };
+  auto set_next = [](NDObject *out, NDObject *next) { out->insn_ = reinterpret_cast<uint64_t *>(next); };
+  auto get_next = [](NDObject *out) { return reinterpret_cast<NDObject *>(out->insn_); };
+  std::vector<Region> regions(prop_num);
+  for (auto op : objects) {
+    if (IsBroker(op)) {
+      if (op->lhs_->prop_id_ == op->prop_id_) {
+        _Redirector().Run(op, objects);
+        return true;
+      }
+      auto &region = regions[op->lhs_->prop_id_];
+      set_next(op, nullptr);
+      if (region.out_head == nullptr) {
+        region.out_head = op;
+      } else {
+        set_next(region.out_tail, op);
+      }
+      region.out_tail = op;
+    }
+  }
+  for (int i = 0; i < prop_num; ++i) {
+    regions[i].desc = uint64_t{1} << i;
+  }
+  for (int pass = 0; pass < prop_num; ++pass) {
+    bool changed = false;
+    for (int src = 0; src < prop_num; ++src) {
+      for (auto out = regions[src].out_head; out != nullptr; out = get_next(out)) {
+        auto dst = out->prop_id_;
+        auto reach = regions[src].desc | regions[dst].desc;
+        if (reach != regions[src].desc) {
+          regions[src].desc = reach;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  NDObject *cycle_broker = nullptr;
+  for (int src = 0; src < prop_num; ++src) {
+    for (auto out = regions[src].out_head; out != nullptr; out = get_next(out)) {
+      if ((regions[out->prop_id_].desc & (1ull << src)) &&
+          (cycle_broker == nullptr || out->index_ < cycle_broker->index_)) {
+        cycle_broker = out;
+      }
+    }
+  }
+  if (cycle_broker) {
+    _Redirector().Run(cycle_broker, objects);
+    return true;
+  }
+  for (int r = 0; r < prop_num; ++r) {
+    if (regions[r].out_head == regions[r].out_tail) continue;
+    auto head = regions[r].out_head;
+    auto desc = regions[head->prop_id_].desc;
+    for (auto x = get_next(head); x != nullptr; x = get_next(x)) {
+      if (desc & regions[x->prop_id_].desc) {
+        _Redirector().Run(x, objects);
+        return true;
+      }
+      desc |= regions[x->prop_id_].desc;
+    }
+  }
+  return false;
+}
+}  // namespace
 
 void VKernelS::BrokerInit() {
   broker_num_ = 0;
@@ -1590,6 +1689,7 @@ void VKernelS::BrokerInit() {
   if (broker_num_ == 0) {
     return;
   }
+RETRY:
   last_broker_ = 0;
   int idx = build_ops_.size() - 1;
   for (auto it = build_ops_.rbegin(); it != build_ops_.rend(); ++it) {
@@ -1628,44 +1728,17 @@ void VKernelS::BrokerInit() {
       op->prop_id_ = GetPdHead(op)->prop_id_;
     }
   }
-  for (size_t bidx = 0; bidx < build_ops_.size(); ++ bidx) {
-    auto op = build_ops_[bidx];
-    if (!IsBroker(op) || op->prop_id_ != op->lhs_->prop_id_) continue;
-    int merged_prop = op->prop_id_;
-    int broker_prop = prop_id++;
-    op->prop_id_ = broker_prop;
-    for (size_t midx = bidx + 1; midx < build_ops_.size(); ++midx) {
-      auto cand = build_ops_[midx];
-      if (cand->prop_id_ != merged_prop) continue;
-      bool is_after = false;
-      bool is_cross = false;
-      cand->ForInput([&](NDObject *in) {
-        if (in->prop_id_ == broker_prop) {
-          is_after = true;
-        } else if (in->prop_id_ == merged_prop) {
-          is_cross = true;
-        }
-      });
-      if (is_after) {
-        if (is_cross) {
-          cand->ForInput([&](NDObject *&in) {
-            if (in->prop_id_ == merged_prop) {
-              in = new ReshapeOp(in, in->shape_ref_);
-              build_ops_.insert(build_ops_.begin() + midx, in);
-              if (midx > static_cast<size_t>(last_broker_)) {
-                last_broker_ = midx;
-              } else {
-                last_broker_++;
-              }
-              broker_num_++;
-              midx++;
-            }
-          });
-        }
-        cand->prop_id_ = broker_prop;
+  if (ResolveBrokerDiamond(build_ops_, prop_id)) {
+    broker_num_ = 0;
+    for (auto op : build_ops_) {
+      SetPdHead(op, nullptr);
+      op->prop_id_ = 0;
+      if (IsBroker(op)) {
+        broker_num_++;
       }
-    } // it2
-  } // it1
+    }
+    goto RETRY;
+  }
 }
 
 class DomainUnifier {
@@ -2116,10 +2189,11 @@ bool VKernelS::NormBuild() {
     Clear();
     if (static_ops_.empty()) {
       Optimize<true>(build_ops_, adopt_ops_);
+      BrokerInit();
       StaticInit(build_ops_);
       SchInit(build_ops_);
     }
-    if (!Normalize(true)) {
+    if (!Normalize(false) || !BrokerAffine()) {
       return false;
     }
   } else {
@@ -2294,9 +2368,10 @@ uint64_t SpecVector<dyn_shape>::CodeGen() {
     if (static_ops_.empty()) {
       BuildFallKernel(true);
       Optimize<true>(build_ops_, adopt_ops_);
+      BrokerInit();
       StaticInit(build_ops_);
     }
-    if (!Normalize(true)) {
+    if (!Normalize(false) || !BrokerAffine()) {
       return FallCodeGen();
     }
     BuildDomain();

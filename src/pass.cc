@@ -671,82 +671,6 @@ void DeadCodeEliminate(BasicBlock &bb) {
 }
 
 namespace {
-
-class NDBindLoad : public NDLoad {
- public:
-  NDBindLoad(NDAccess *input) : NDLoad(nullptr, input->shape_ref_, input->type_id_) {
-    SetFlag(OBJ_FLAG_LOAD_BIND);
-    addr_.gm = input;
-  }
-  ~NDBindLoad() override {
-    for (auto *bind : bind_addrs_) delete bind;
-  }
-  void Normalize(std::vector<NDObject *> &run_ops) override {
-    NDLoad::Normalize(run_ops);
-    addr_used_ = 0;
-  }
-  uint64_t Emit(VectorKernel &k) override {
-    auto &input = *LoadBind();
-    if (!input.addr_.reloc_) input.addr_.Update(&input.addr_.data);
-    auto size = NDLoad::Emit(k);
-    RelocAddr *bind;
-    if (addr_used_ < static_cast<int>(bind_addrs_.size())) {
-      bind = bind_addrs_[addr_used_++];
-    } else {
-      bind = new RelocAddr();
-      bind_addrs_.push_back(bind);
-      addr_used_++;
-    }
-    bind->Update(addr_);
-    k.code_.BindOpFast(*bind, input.addr_);
-    return size;
-  }
-  NDObject *Clone(CloneHelper &h) override { return new NDBindLoad(static_cast<NDAccess *>(h.GetClone(LoadBind()))); }
-  void Dump(bool verbose, std::ostringstream &oss) override { oss << "BindLoad"; }
-  std::vector<RelocAddr *> bind_addrs_;
-  int addr_used_{0};
-};
-
-class NDViewBindLoad : public NDViewLoad {
- public:
-  NDViewBindLoad(NDViewLoad *input)
-      : NDViewLoad(nullptr, input->shape_ref_, input->src_stride_ref_, input->type_id_), input_(input) {
-    SetFlag(OBJ_FLAG_LOAD_BIND);
-  }
-  ~NDViewBindLoad() override {
-    for (auto *bind : bind_addrs_) delete bind;
-  }
-  void Normalize(std::vector<NDObject *> &run_ops) override {
-    NDViewLoad::Normalize(run_ops);
-    addr_used_ = 0;
-  }
-  uint64_t Emit(VectorKernel &k) override {
-    auto &input = *input_;
-    if (!input.addr_.reloc_) input.addr_.Update(&input.addr_.data);
-    auto size = NDViewLoad::Emit(k);
-    RelocAddr *bind;
-    if (addr_used_ < static_cast<int>(bind_addrs_.size())) {
-      bind = bind_addrs_[addr_used_++];
-    } else {
-      bind = new RelocAddr();
-      bind_addrs_.push_back(bind);
-      addr_used_++;
-    }
-    bind->Update(addr_);
-    k.code_.BindOpFast(*bind, input.addr_);
-    return size;
-  }
-  NDObject *Clone(CloneHelper &h) override {
-    auto input = static_cast<NDViewLoad *>(h.GetClone(static_cast<NDObject *>(input_)));
-    return new NDViewBindLoad(input);
-  }
-  void Dump(bool verbose, std::ostringstream &oss) override { oss << "ViewBindLoad"; }
- private:
-  NDViewLoad *input_;
-  std::vector<RelocAddr *> bind_addrs_;
-  int addr_used_{0};
-};
-
 struct VisitState {
   uint32_t cnt{0};
   std::vector<uint64_t> mask;
@@ -811,11 +735,7 @@ struct DiamondCloneHelper final : public CloneHelper {
     if (op->IsLoad()) {
       auto input = static_cast<NDAccess *>(op);
       while (input->CheckFlag(OBJ_FLAG_LOAD_BIND)) input = input->LoadBind();
-      NDObject *bind;
-      if (input->GetObjectType() == kViewLoad)
-        bind = Insert(new NDViewBindLoad(static_cast<NDViewLoad *>(input)));
-      else
-        bind = Insert(new NDBindLoad(input));
+      auto bind = Insert(input->CloneBind());
       bb_->AddUser(input, bind);
       return bind;
     }

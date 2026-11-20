@@ -431,3 +431,22 @@ def test_reshape_expand_outmost_dim():
     x1 = t.add(x0, t.load(b))
     t.store_expect(x1, a.reshape([10, 1, 200]) + b)
     assert (t.run_check())
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.gpu
+def test_reshape_before_after_connect_indirect():
+    t = Tester()
+    a = np.random.normal(0.0, 0.3, [8, 1]).astype(np.float32)
+    x0 = t.load(a)
+    x1 = t.broadcast(x0, [8, 16])
+    x2 = t.reshape(x1, [8, 16, 1])
+    x3 = t.broadcast(x2, [8, 16, 32])
+    x4 = t.reshape(x3, [8, 512])
+    x5 = t.mul(x0, 0.1)
+    x6 = t.broadcast(x5, [8, 512])
+    x7 = t.add(x4, x6)
+    left = np.broadcast_to(np.broadcast_to(a, [8, 16]).reshape([8, 16, 1]), [8, 16, 32]).reshape([8, 512])
+    right = np.broadcast_to(a * 0.1, [8, 512])
+    t.store_expect(x7, left + right)
+    assert (t.run_check())

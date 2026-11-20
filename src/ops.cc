@@ -223,6 +223,34 @@ uint64_t GetDynXBufBegin(const VectorKernel &k, NDObject *cur) {
   }
   return xbuf;
 }
+
+class AccessBind {
+ public:
+  AccessBind() = default;
+  ~AccessBind() {
+    for (auto *bind : bind_addrs_) delete bind;
+  }
+  void Normalize() { addr_used_ = 0; }
+  void EmitBind(VectorKernel &k, NDAccess *self) {
+    auto input = self->LoadBind();
+    if (!input->addr_.reloc_) {
+      input->addr_.Update(&input->addr_.data);
+    }
+    RelocAddr *bind;
+    if (addr_used_ < static_cast<int>(bind_addrs_.size())) {
+      bind = bind_addrs_[addr_used_++];
+    } else {
+      bind = new RelocAddr();
+      bind_addrs_.push_back(bind);
+      addr_used_++;
+    }
+    bind->Update(self->addr_);
+    k.code_.BindOpFast(*bind, input->addr_);
+  }
+ protected:
+  std::vector<RelocAddr *> bind_addrs_;
+  int addr_used_{0};
+};
 }  // namespace
 
 bool CollectRoundTile(const DimArray &nd, const TileParam &tp, DimArray &round_tile) {
@@ -622,6 +650,11 @@ void NDObject::Inspect(Inspector &sp) {}
 
 void NDObject::TileCollectSimt(NDObject *op, TileInfo &info) { info.flags |= ObjectMeta::kSimt; }
 
+NDAccess *NDAccess::CloneBind() {
+  DvmException("[BUG] NDAccess::CloneBind is not inheritted!");
+  return nullptr;
+}
+
 bool NDAccess::IsSupportView() const {
 #ifndef DVM_ARCH_GPU
   if (obj_id_ == kViewLoad || obj_id_ == kViewStore || obj_id_ == kLoadDummy || obj_id_ == kLoad) {
@@ -716,6 +749,7 @@ NDObject *NDGlobalAccess::Clone(CloneHelper &h) {
 void NDGlobalAccess::Dump(bool verbose, std::ostringstream &oss) { oss << "GlobalAccess"; }
 
 NDObject *NDLoadDummy::Clone(CloneHelper &h) { return new NDLoadDummy(type_id_); }
+NDAccess *NDLoadDummy::CloneBind() { return new NDLoadDummy(type_id_); }
 
 void NDLoadDummy::Dump(bool verbose, std::ostringstream &oss) { oss << "LoadDummy"; }
 
@@ -1093,6 +1127,27 @@ NDObject *NDLoad::Clone(CloneHelper &h) {
   return new NDLoad(addr_.gm, shape_ref, type_id_);
 }
 
+NDAccess *NDLoad::CloneBind() {
+  struct _BindOp : public NDLoad {
+    _BindOp(NDAccess *input) : NDLoad(nullptr, input->shape_ref_, input->type_id_) { SetBind(input); }
+    void Normalize(std::vector<NDObject *> &run_ops) override {
+      NDLoad::Normalize(run_ops);
+      bind_.Normalize();
+    }
+    uint64_t Emit(VectorKernel &k) override {
+      auto size = NDLoad::Emit(k);
+      bind_.EmitBind(k, this);
+      return size;
+    }
+    NDObject *Clone(CloneHelper &h) override {
+      return new _BindOp(static_cast<NDAccess *>(h.GetClone(this)));
+    }
+    void Dump(bool verbose, std::ostringstream &oss) override { oss << "BindLoad"; }
+    AccessBind bind_;
+  };
+  return new _BindOp(this);
+}
+
 void NDLoad::Dump(bool verbose, std::ostringstream &oss) { oss << "Load"; }
 
 void NDGatherLoad::Normalize(std::vector<NDObject *> &run_ops) {
@@ -1238,6 +1293,28 @@ NDObject *NDViewLoad::Clone(CloneHelper &h) {
   auto shape_ref = h.GetClone(shape_ref_);
   auto src_stride_ref = h.GetClone(src_stride_ref_);
   return new NDViewLoad(addr_.gm, shape_ref, src_stride_ref, type_id_);
+}
+
+NDAccess *NDViewLoad::CloneBind() {
+  struct _BindOp : public NDViewLoad {
+    _BindOp(NDViewLoad *input)
+        : NDViewLoad(nullptr, input->shape_ref_, input->src_stride_ref_, input->type_id_) {
+      SetBind(input);
+    }
+    void Normalize(std::vector<NDObject *> &run_ops) override {
+      NDViewLoad::Normalize(run_ops);
+      bind_.Normalize();
+    }
+    uint64_t Emit(VectorKernel &k) override {
+      auto size = NDViewLoad::Emit(k);
+      bind_.EmitBind(k, this);
+      return size;
+    }
+    NDObject *Clone(CloneHelper &h) override { return new _BindOp(static_cast<NDViewLoad *>(h.GetClone(this))); }
+    void Dump(bool verbose, std::ostringstream &oss) override { oss << "ViewBindLoad"; }
+    AccessBind bind_;
+  };
+  return new _BindOp(this);
 }
 
 void NDViewLoad::Dump(bool verbose, std::ostringstream &oss) {
