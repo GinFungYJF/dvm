@@ -266,7 +266,11 @@ EmitResult EmitEqScalar(EmitCtx &ctx, const at::Tensor &a, const at::Scalar &b) 
   // Comparisons narrow floating scalars without the overflow check used by
   // fill operations; a very large scalar compares as infinity in FP32/FP16.
   const float value = b.isFloatingPoint() ? static_cast<float>(b.to<double>()) : b.to<float>();
-  auto *result = ctx.k->GetKernel().Binary<dvm::kEqual>(ctx.k->Read(a), value);
+  auto *input = ctx.k->Read(a);
+  auto *result = ctx.k->GetKernel().Binary<dvm::kEqual>(input, value);
+  if (a.scalar_type() == at::kBool) {
+    ctx.k->RecordBoolPredicate(result, input, value == 0.0f);
+  }
   at::Tensor out = AllocateLike(std::vector<int64_t>(a.sizes().begin(), a.sizes().end()),
                                 at::kBool, a);
   ctx.k->Write(out, result);
@@ -290,9 +294,12 @@ EmitResult EmitMaskedFill(EmitCtx &ctx, const at::Tensor &self, const at::Tensor
                      value.to<float>();
   auto &kernel = ctx.k->GetKernel();
   auto *input = ctx.k->Read(self);
-  auto *condition = ctx.k->Read(mask);
+  const auto condition = ctx.k->ResolveBoolPredicate(ctx.k->Read(mask));
   auto *constant = kernel.Broadcast(fill, dvm::Kernel::GetShape(input), ToDvmDtype(self.scalar_type()));
-  auto *result = kernel.Select(condition, constant, input);
+  // Keep the comparison available for saved masks and other consumers. Only
+  // Select bypasses bool == 0/1, using the original condition and its polarity.
+  auto *result = condition.inverted ? kernel.Select(condition.value, input, constant) :
+                                     kernel.Select(condition.value, constant, input);
   if (inplace) {
     ctx.k->WriteInplace(self, result);
     ctx.k->AppendSignature(std::string(ctx.op_name) + "!");

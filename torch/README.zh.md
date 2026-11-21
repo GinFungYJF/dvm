@@ -72,6 +72,9 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 这些路径要求输入为非空、连续的 CUDA 张量；混合 dtype、整数比较、Tensor 填充值
 以及不支持的布局回退到原生 kernel。
 
+待执行图中的 Bool 与标量 0/1 的比较结果用于 `masked_fill` 时，emit 会使用原始
+Bool 条件并调整 Select 分支。反向保存的 mask 和其他仍被使用的比较结果照常写回。
+
 `detach` 调用原生元数据操作并保留待执行计算，使 storage 别名和版本计数保持
 PyTorch 语义。通过 detached 别名写入以及需要读取实际数据的消费者，仍会按需
 触发 flush。可通过 `disable_ops="detach"` 恢复 detach 处的 flush。

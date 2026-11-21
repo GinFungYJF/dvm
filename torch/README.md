@@ -80,6 +80,10 @@ and a broadcastable Bool mask. These paths require nonempty contiguous CUDA
 inputs; mixed dtypes, integer comparisons, Tensor fill values and unsupported
 layouts fall back to native kernels.
 
+When a pending Bool scalar comparison to 0 or 1 feeds `masked_fill`, the emitter uses
+the original Boolean condition and adjusts the Select branches. Saved masks and
+other live comparison results are still materialized for their consumers.
+
 `detach` preserves pending computation while calling the native metadata operation,
 so storage aliases and version counters retain PyTorch semantics. Writes through
 detached aliases and consumers that require materialized data still flush as

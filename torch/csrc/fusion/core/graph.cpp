@@ -104,6 +104,17 @@ dvm::NDObject *GraphKernel::Read(const at::Tensor &t) {
   return LoadStorage(t, e);
 }
 
+GraphKernel::BoolPredicate GraphKernel::ResolveBoolPredicate(dvm::NDObject *value) const {
+  const auto it = bool_predicates_.find(value);
+  return it == bool_predicates_.end() ? BoolPredicate{value, false} : it->second;
+}
+
+void GraphKernel::RecordBoolPredicate(dvm::NDObject *result, dvm::NDObject *input, bool inverted) {
+  auto predicate = ResolveBoolPredicate(input);
+  predicate.inverted ^= inverted;
+  bool_predicates_[result] = predicate;
+}
+
 dvm::NDObject *GraphKernel::ReduceSum(dvm::NDObject *input, const std::vector<int64_t> &dims,
                                      bool keepdim) {
   ++reduction_ops_;
@@ -232,6 +243,7 @@ bool GraphKernel::Flush(void *stream, Stats *stats) {
 }
 
 void GraphKernel::Reset() {
+  bool_predicates_.clear();
   kernel_.Reset(dvm::kEager, dvm::kUnifyWS);
   pending_stores_.clear();
   shape_storage_.clear();

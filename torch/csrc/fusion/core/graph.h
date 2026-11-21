@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "flags.h"
@@ -73,6 +74,15 @@ class GraphKernel {
 
   /** Node holding this storage's current value; loads from GM if absent. */
   dvm::NDObject *Read(const at::Tensor &t);
+
+  struct BoolPredicate {
+    dvm::NDObject *value;
+    bool inverted{false};
+  };
+
+  /** Equivalent Boolean condition, optionally with the Select branches swapped. */
+  BoolPredicate ResolveBoolPredicate(dvm::NDObject *value) const;
+  void RecordBoolPredicate(dvm::NDObject *result, dvm::NDObject *input, bool inverted);
 
   /** Keep reduction dimensions alive until the deferred kernel is destroyed. */
   dvm::NDObject *ReduceSum(dvm::NDObject *input, const std::vector<int64_t> &dims,
@@ -124,6 +134,9 @@ class GraphKernel {
   dvm::IntArrayRef *HoldShape(const std::vector<int64_t> &shape);
 
   SideTable table_;
+  // Immutable node identities keep predicate origins separate from later writes
+  // or reloads of the same tensor storage. All origins expire with the graph.
+  std::unordered_map<dvm::NDObject *, BoolPredicate> bool_predicates_;
   // A failed emitter can leave loads or IR without producing a pending store.
   bool has_state_{false};
   bool has_pending_{false};
