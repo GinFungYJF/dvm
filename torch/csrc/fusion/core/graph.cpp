@@ -80,7 +80,7 @@ dvm::NDObject *GraphKernel::LoadStorage(const at::Tensor &t, TensorEntry &e) {
   dvm::NDObject *node = kernel_.Load(t.data_ptr(), HoldShape(shape), dtype);
 
   e.value = node;
-  e.loaded_from_gm = true;
+  e.has_memory_load = true;
   e.needs_store = false;
   e.offset = t.storage_offset();
   e.numel = t.numel();
@@ -121,12 +121,16 @@ dvm::NDObject *GraphKernel::ReduceSum(dvm::NDObject *input, const std::vector<in
   return kernel_.Reduce<dvm::kSum>(input, HoldShape(dims), keepdim);
 }
 
+dvm::NDObject *GraphKernel::Broadcast(dvm::NDObject *input, const std::vector<int64_t> &shape) {
+  return kernel_.Broadcast(input, HoldShape(shape));
+}
+
 void GraphKernel::RecordStore(const at::Tensor &t, dvm::NDObject *value, bool inplace) {
   has_state_ = true;
   TensorEntry &e = table_.Upsert(t);
   e.value = value;
   e.needs_store = true;
-  e.loaded_from_gm = false;
+  // Preserve earlier memory loads even when this storage now has a produced value.
   e.offset = t.storage_offset();
   e.numel = t.numel();
   e.shape.assign(t.sizes().begin(), t.sizes().end());
@@ -315,9 +319,11 @@ bool GraphManager::HasPending() const {
   return current_ != nullptr && !current_->Empty();
 }
 
-bool GraphManager::NeedFlushForInputs(at::TensorList inputs, bool writable) const {
+bool GraphManager::NeedFlushForInputs(at::TensorList inputs, size_t writable_prefix,
+                                      bool reuse_produced_writes) const {
   std::lock_guard<std::recursive_mutex> lock(mu_);
-  return current_ != nullptr && current_->NeedFlushForInputs(inputs, writable);
+  return current_ != nullptr &&
+         current_->NeedFlushForInputs(inputs, writable_prefix, reuse_produced_writes);
 }
 
 std::map<FlushReason, size_t> GraphManager::ReasonTotals() const {

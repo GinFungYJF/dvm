@@ -71,7 +71,7 @@ Fusible operators with handwritten unboxed wrappers:
 
 `add` `sub` `mul` `div` `maximum` `minimum` `pow(Tensor,Scalar)` `neg` `relu`
 `sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `clamp` `round` `floor`
-`ceil` `trunc` `sum` `mean`, plus `add_` `sub_` `mul_` `div_` `relu_`.
+`ceil` `trunc` `sum` `mean` `native_dropout_backward`, plus `add_` `sub_` `mul_` `div_` `relu_`.
 
 `mul.Scalar` is covered as well as `mul.Tensor`. `eq.Tensor` / `eq.Scalar`
 accept matching floating-point or Bool inputs; Bool scalar comparisons fuse for
@@ -80,9 +80,35 @@ and a broadcastable Bool mask. These paths require nonempty contiguous CUDA
 inputs; mixed dtypes, integer comparisons, Tensor fill values and unsupported
 layouts fall back to native kernels.
 
+Scalar division also accepts an FP32 input expanded along its last dimension
+when collapsing that dimension leaves contiguous storage. Both `div.Scalar` and
+the wrapped-scalar `div.Tensor` path load the compact input, divide, and broadcast
+inside the graph. The divisor must be finite and nonzero in FP32. Other strided
+layouts use native kernels; expanded tensors are never used as write targets.
+
+`native_dropout_backward` joins an existing gradient producer for nonempty,
+contiguous FP32 gradients and a matching contiguous Bool mask, with a finite FP32
+scale. This enables broadcast division → `add_` → dropout backward to fuse while
+standalone dropout backward remains native. Live accumulation results and aliases
+are still written back; dead intermediate stores are removed.
+
+`masked_fill_` can update an exact pending result within its producing graph when
+that storage has no memory Load in the graph. Earlier consumers retain their old
+value nodes, and later consumers see the updated value. Writes to previously
+loaded storage and mismatched overlapping views still flush before proceeding.
+
 When a pending Bool scalar comparison to 0 or 1 feeds `masked_fill`, the emitter uses
 the original Boolean condition and adjusts the Select branches. Saved masks and
 other live comparison results are still materialized for their consumers.
+
+Tensor-Tensor `add`/`add_` and reductions (`sum`/`mean`) join a graph only when an
+input is produced by that pending graph. Otherwise they run natively. Scalar add
+paths remain eligible to start graphs. The check follows stream, alias and graph
+size boundaries. Tensor-Tensor `add_` can consume an exact pending read operand
+when its destination storage is outside the graph; writes to graph storage and
+read views that do not match the stored tensor metadata still flush. This policy
+also sends an initial native add followed by mean to native kernels, while
+retaining add and reductions that consume pending values.
 
 `detach` preserves pending computation while calling the native metadata operation,
 so storage aliases and version counters retain PyTorch semantics. Writes through
@@ -95,15 +121,16 @@ kernel captured before registration**.
 Known limitations:
 
 - Fusion accepts contiguous, dense CUDA tensors with at most 10 dimensions,
-  matching DVM's shape storage capacity.
+  matching DVM's shape storage capacity. The read-only scalar division broadcast
+  described above is the supported exception to contiguous input layout.
 - `int64` arithmetic is not fused because the GPU VM has no int64 arithmetic instructions.
 - Python scalars are fused only with floating-point tensors. PyTorch promotes
   `int32 / 2` to float32, which the VM cannot express while preserving those semantics.
 - Reductions with empty, integer, or FP64 inputs, unsupported output dtypes,
   noncontiguous inputs, or deterministic algorithms enabled use native kernels.
-- `sum` joins fusion only when its input is produced by the current pending graph.
-  A sum over an already materialized tensor uses the native kernel, including
-  when it would otherwise start a chain with later operators. `mean` is unchanged.
+- `sum` and `mean` join fusion only when their input is produced by the current
+  pending graph. Reductions over already materialized tensors use native kernels,
+  including when they would otherwise start a chain with later operators.
 - `sum.out`, `mean.out`, and other reductions such as `amax` / `amin` execute after
   the generic guard flushes the pending graph.
 - `tanh` / `sigmoid` are synthesized from `exp`. `tanh` fusion is disabled by default

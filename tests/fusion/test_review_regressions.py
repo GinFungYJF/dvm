@@ -208,15 +208,16 @@ def test_empty_flush_boundaries_preserve_next_graph():
 
 
 @CUDA
-def test_inplace_flushes_pending_read_operand():
-    x = torch.arange(128, device="cuda", dtype=torch.float32)
+@pytest.mark.parametrize("operation", ["add_", "sub_", "mul_", "div_"])
+def test_inplace_pending_read_operand_boundary(operation):
+    x = torch.arange(1, 129, device="cuda", dtype=torch.float32)
     destination = torch.ones_like(x)
-    expected = destination + x * 2
+    expected = getattr(destination.clone(), operation)(x * 2)
     with fused():
         dvm_torch.reset_stats()
         pending = x * 2
-        destination.add_(pending)
-        assert dvm_torch.stats()["flushes"] == 1
+        getattr(destination, operation)(pending)
+        assert dvm_torch.stats()["flushes"] == (0 if operation == "add_" else 1)
         dvm_torch.flush()
-        assert dvm_torch.stats()["graph_sizes"] == {1: 2}
+        assert dvm_torch.stats()["graph_sizes"] == ({2: 1} if operation == "add_" else {1: 2})
     assert_same(destination, expected)

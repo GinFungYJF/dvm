@@ -55,14 +55,26 @@ bool SideTable::ContainsStorage(const at::Tensor &t) const {
   return map_.find(StorageOf(t)) != map_.end();
 }
 
-bool SideTable::NeedFlushForInputs(at::TensorList inputs, bool writable) const {
+bool SideTable::NeedFlushForInputs(at::TensorList inputs, size_t writable_prefix,
+                                   bool reuse_produced_writes) const {
   std::shared_lock<std::shared_mutex> lock(mu_);
-  for (const auto &t : inputs) {
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    const auto &t = inputs[i];
     if (!t.defined() || !t.has_storage()) {
       continue;
     }
     auto it = map_.find(StorageOf(t));
-    if (it != map_.end() && (writable || !Matches(t, it->second))) {
+    if (it == map_.end()) {
+      continue;
+    }
+    const auto &entry = it->second;
+    if (!Matches(t, entry)) {
+      return true;
+    }
+    // Replacing a produced value only changes the latest node for this storage.
+    // An older memory Load could race with the final store in a split kernel.
+    if (i < writable_prefix &&
+        !(reuse_produced_writes && entry.needs_store && !entry.has_memory_load)) {
       return true;
     }
   }

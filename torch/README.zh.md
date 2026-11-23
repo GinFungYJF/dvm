@@ -62,7 +62,7 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 
 `add` `sub` `mul` `div` `maximum` `minimum` `pow(Tensor,Scalar)` `neg` `relu`
 `sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `clamp` `round` `floor`
-`ceil` `trunc` `sum` `mean`，以及 `add_` `sub_` `mul_` `div_` `relu_`。
+`ceil` `trunc` `sum` `mean` `native_dropout_backward`，以及 `add_` `sub_` `mul_` `div_` `relu_`。
 
 其余 aten 算子注册一条通用守卫：**先 flush 再转发到注册前捕获的原 kernel**。
 
@@ -72,8 +72,28 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 这些路径要求输入为非空、连续的 CUDA 张量；混合 dtype、整数比较、Tensor 填充值
 以及不支持的布局回退到原生 kernel。
 
+标量除法还支持仅沿末维扩展、压回该维后底层连续的 FP32 输入。`div.Scalar` 和
+标量包装为 Tensor 的 `div.Tensor` 路径都会读取紧凑输入，在图内完成除法和广播。
+除数转换成 FP32 后必须有限且非零；其他非连续布局走原生，扩展张量不作为写入目标。
+
+`native_dropout_backward` 仅在梯度已有 pending 生产者时加入融合，要求非空、连续
+FP32 梯度、同 shape 的连续 Bool mask，以及转换成 FP32 后有限的 scale。这样可以
+融合广播除法 → `add_` → dropout 反向，独立 dropout 反向仍走原生。仍存活的累加
+结果及别名照常写回，死亡中间结果的写回由 DSE 删除。
+
 待执行图中的 Bool 与标量 0/1 的比较结果用于 `masked_fill` 时，emit 会使用原始
 Bool 条件并调整 Select 分支。反向保存的 mask 和其他仍被使用的比较结果照常写回。
+
+`masked_fill_` 的目标精确匹配图内新产生的结果，且该 storage 在图中没有内存 Load 时，
+可以直接在原图中更新。此前的消费者继续引用旧值节点，后续消费者使用新值。
+写入已经被 Load 读取的 storage，或存在元数据不匹配的重叠 view 时，仍先 flush。
+
+Tensor-Tensor `add`/`add_` 和归约（`sum`/`mean`）仅在输入由当前待执行图产生时
+加入融合，否则使用原生 kernel；标量 add 路径仍可作为图的起点。该检查在流、别名
+和图大小边界处理之后执行。Tensor-Tensor `add_` 的目标 storage 不在图中时，可以
+消费精确匹配的 pending 只读输入；写入图中 storage 或读取不匹配的重叠 view 仍会 flush。
+因此，以原生 add 开头的 add → mean 也会整体走原生；消费 pending 输入的 add 和
+归约仍可融合。
 
 `detach` 调用原生元数据操作并保留待执行计算，使 storage 别名和版本计数保持
 PyTorch 语义。通过 detached 别名写入以及需要读取实际数据的消费者，仍会按需
@@ -82,12 +102,13 @@ PyTorch 语义。通过 detached 别名写入以及需要读取实际数据的�
 已知边界：
 
 - 融合输入为连续的密集 CUDA 张量，最多 10 维，与 DVM 的形状存储容量一致。
+  上述只读标量除法广播是支持的非连续输入例外。
 - `int64` 不参与算术融合（GPU VM 无 int64 算力指令）。
 - Python 标量只对浮点张量融合：`int32 / 2` 在 torch 中提升为 float32，
   VM 无法在不改变语义的前提下表达。
 - 空输入、整数或 FP64 归约、其他输出 dtype、非连续输入以及确定性算法模式走原生归约。
-- `sum` 仅在输入由当前待执行图产生时参与融合。对已物化张量的 sum 使用原生
-  kernel，包括原本可以由 sum 开始、再连接后续算子的链。`mean` 不受此限制。
+- `sum` 和 `mean` 仅在输入由当前待执行图产生时参与融合。对已物化张量的归约
+  使用原生 kernel，包括原本可以由归约开始、再连接后续算子的链。
 - `sum.out` / `mean.out` 和 `amax` / `amin` 等其余归约由通用守卫触发 flush 后执行。
 - `tanh` / `sigmoid` 由 `exp` 合成。`tanh` 默认关闭，可由 `compile_fast=True` 启用。
 

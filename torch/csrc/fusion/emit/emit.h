@@ -54,6 +54,10 @@ EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &
                             const at::Scalar &b);
 EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
                                const at::Tensor &b);
+/** FP32 scalar division of a compact input expanded along its last dimension. */
+EmitResult EmitExpandedDiv(EmitCtx &ctx, const at::Tensor &input, const at::Scalar &divisor);
+EmitResult EmitDropoutBackward(EmitCtx &ctx, const at::Tensor &grad, const at::Tensor &mask,
+                               double scale);
 EmitResult EmitEq(EmitCtx &ctx, const at::Tensor &a, const at::Tensor &b);
 EmitResult EmitEqScalar(EmitCtx &ctx, const at::Tensor &a, const at::Scalar &b);
 EmitResult EmitMaskedFill(EmitCtx &ctx, const at::Tensor &self, const at::Tensor &mask,

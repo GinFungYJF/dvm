@@ -42,7 +42,7 @@ namespace dvm_torch {
 struct TensorEntry {
   dvm::NDObject *value{nullptr}; ///< Current value for this storage in the graph.
   bool needs_store{false};       ///< Graph produced this value; flush must write it.
-  bool loaded_from_gm{false};    ///< value came straight from a Load node.
+  bool has_memory_load{false};  ///< This graph contains a Load from the storage.
   int64_t offset{0};
   int64_t numel{0};
   std::vector<int64_t> shape;
@@ -64,8 +64,9 @@ class SideTable {
   const TensorEntry *FindExact(const at::Tensor &t) const;
   /** Storage-only membership: used for write-alias detection. */
   bool ContainsStorage(const at::Tensor &t) const;
-  /** Check read views or writable operands with one lookup per input. */
-  bool NeedFlushForInputs(at::TensorList inputs, bool writable) const;
+  /** Only freshly produced storage can reuse a pending value across a write. */
+  bool NeedFlushForInputs(at::TensorList inputs, size_t writable_prefix,
+                          bool reuse_produced_writes) const;
 
   TensorEntry *Get(const at::Tensor &t);
   TensorEntry *GetByStorage(c10::StorageImpl *s);

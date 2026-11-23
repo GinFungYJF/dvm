@@ -88,6 +88,9 @@ class GraphKernel {
   dvm::NDObject *ReduceSum(dvm::NDObject *input, const std::vector<int64_t> &dims,
                            bool keepdim);
 
+  /** Keep broadcast dimensions alive until the deferred kernel is destroyed. */
+  dvm::NDObject *Broadcast(dvm::NDObject *input, const std::vector<int64_t> &shape);
+
   /** Register a freshly produced value; the store is deferred. */
   void Write(const at::Tensor &out, dvm::NDObject *value);
 
@@ -102,8 +105,9 @@ class GraphKernel {
     const TensorEntry *entry = table_.FindExact(t);
     return entry != nullptr && entry->needs_store;
   }
-  bool NeedFlushForInputs(at::TensorList inputs, bool writable) const {
-    return has_pending_ && table_.NeedFlushForInputs(inputs, writable);
+  bool NeedFlushForInputs(at::TensorList inputs, size_t writable_prefix,
+                          bool reuse_produced_writes) const {
+    return has_pending_ && table_.NeedFlushForInputs(inputs, writable_prefix, reuse_produced_writes);
   }
   bool ShouldTrim() const {
     // EagerArea uses a 64-bit dependency mask. Each result can introduce a
@@ -172,7 +176,8 @@ class GraphManager {
   void Discard();
   void Flush(FlushReason reason);
 
-  bool NeedFlushForInputs(at::TensorList inputs, bool writable = false) const;
+  bool NeedFlushForInputs(at::TensorList inputs, size_t writable_prefix = 0,
+                          bool reuse_produced_writes = false) const;
   bool HasPending() const;
 
   Stats &GetStats() { return stats_; }

@@ -124,7 +124,8 @@ bool FusionActive() {
  * Shared prologue. Resolve execution and alias boundaries before emission;
  * emitters check tensor eligibility before constructing any graph nodes.
  */
-bool Prepare(const OpKey &key, at::TensorList inputs, GraphKernel **out, bool writable = false) {
+bool Prepare(const OpKey &key, at::TensorList inputs, GraphKernel **out, size_t writable_prefix = 0,
+             bool reuse_produced_writes = false) {
   if (in_native_kernel || !OpEnabled(key)) {
     return false;
   }
@@ -136,10 +137,10 @@ bool Prepare(const OpKey &key, at::TensorList inputs, GraphKernel **out, bool wr
     // by the first op that runs outside the capture window.
     return false;
   }
-  // A view over a pending storage cannot reuse the node, and a write to any
-  // storage the graph has touched has to be resolved against real memory.
-  // In-place ops check every operand: the read operand can also be pending.
-  if (gm.NeedFlushForInputs(inputs, writable)) {
+  // Mismatched views and writes to storage with an earlier memory Load flush.
+  // Exact reads reuse their nodes. Selected writes can replace a fresh result
+  // while earlier consumers keep their immutable value nodes.
+  if (gm.NeedFlushForInputs(inputs, writable_prefix, reuse_produced_writes)) {
     gm.Flush(FlushReason::kWriteAlias);
   }
   GraphKernel *k = gm.Get();
@@ -215,6 +216,9 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
+    if (op == dvm::kDiv && !a.is_contiguous()) {
+      return EmitExpandedDiv(ctx, a, b.item());
+    }
     return EmitBinaryScalar(ctx, op, a, b.item());
   }
   if (IsWrappedScalar(a)) {
@@ -227,6 +231,11 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
   if (!Prepare(key, {a, b}, &k)) {
     return std::nullopt;
   }
+  // Tensor add extends an existing producer instead of starting a new graph.
+  // Prepare may have materialised that producer at a stream or alias boundary.
+  if (op == dvm::kAdd && !k->HasPendingProducer(a) && !k->HasPendingProducer(b)) {
+    return std::nullopt;
+  }
   EmitCtx ctx{k, key.name.c_str()};
   return EmitBinary(ctx, op, a, b);
 }
@@ -236,13 +245,19 @@ EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tenso
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
   if (IsWrappedScalar(other)) {
-    if (!Prepare(key, {self}, &k, true)) {
+    if (!Prepare(key, {self}, &k, 1)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
     return EmitBinaryInplaceScalar(ctx, op, self, other.item());
   }
-  if (!Prepare(key, {self, other}, &k, true)) {
+  // add_ can consume a pending read operand when self is outside the graph.
+  // Keep the conservative boundary on both operands for other in-place ops.
+  const size_t writable_prefix = op == dvm::kAdd ? 1 : 2;
+  if (!Prepare(key, {self, other}, &k, writable_prefix)) {
+    return std::nullopt;
+  }
+  if (op == dvm::kAdd && !k->HasPendingProducer(self) && !k->HasPendingProducer(other)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -258,6 +273,27 @@ EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::
   }
   EmitCtx ctx{k, key.name.c_str()};
   return EmitBinaryScalar(ctx, op, a, b);
+}
+
+EmitResult DispatchExpandedDiv(const OpKey &key, const at::Tensor &input, const at::Scalar &divisor) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {input}, &k)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitExpandedDiv(ctx, input, divisor);
+}
+
+EmitResult DispatchDropoutBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &mask,
+                                   double scale) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {grad, mask}, &k) || !k->HasPendingProducer(grad)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitDropoutBackward(ctx, grad, mask, scale);
 }
 
 EmitResult DispatchEqScalar(const OpKey &key, const at::Tensor &a, const at::Scalar &b) {
@@ -290,7 +326,7 @@ EmitResult DispatchMaskedFill(const OpKey &key, const at::Tensor &self, const at
                               const at::Scalar &value, bool inplace) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {self, mask}, &k, inplace)) {
+  if (!Prepare(key, {self, mask}, &k, inplace ? 1 : 0, inplace)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -387,7 +423,7 @@ EmitResult DispatchClamp(const OpKey &key, const at::Tensor &a,
 EmitResult DispatchReluInplace(const OpKey &key, at::Tensor &self) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
-  if (!Prepare(key, {self}, &k, true)) {
+  if (!Prepare(key, {self}, &k, 1)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -401,9 +437,10 @@ EmitResult DispatchReduction(const OpKey &key, const at::Tensor &a, at::Optional
   if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
-  // Sum only joins a graph that produces its input. Check after Prepare, since
-  // alias, stream, and size boundaries may have materialised that producer.
-  if (!mean && !k->HasPendingProducer(a)) {
+  // Reductions only join a graph that produces their input. Applying this to
+  // mean as well keeps native add from leaving an isolated DVM mean behind.
+  // Prepare may have materialised the producer at an execution boundary.
+  if (!k->HasPendingProducer(a)) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
@@ -503,6 +540,27 @@ at::Tensor WrapDivTensor(const at::Tensor &a, const at::Tensor &b) {
   }
   FlushForFallback(FlushReason::kNonFusibleOp);
   return CallOriginal<at::Tensor>(kKey, a, b);
+}
+
+at::Tensor WrapDivScalar(const at::Tensor &a, const at::Scalar &b) {
+  static const OpKey kKey{"aten::div", "Scalar"};
+  // Keep the direct scalar overload's native path except for compact broadcasts.
+  if (!a.is_contiguous()) {
+    if (auto out = DispatchExpandedDiv(kKey, a, b); out.has_value()) {
+      return *out;
+    }
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, a, b);
+}
+
+at::Tensor WrapDropoutBackward(const at::Tensor &grad, const at::Tensor &mask, double scale) {
+  static const OpKey kKey{"aten::native_dropout_backward", ""};
+  if (auto out = DispatchDropoutBackward(kKey, grad, mask, scale); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, grad, mask, double{scale});
 }
 
 at::Tensor WrapMaximum(const at::Tensor &a, const at::Tensor &b) {
@@ -749,6 +807,8 @@ bool RegisterWrapper(const OpKey &key, Fn fn) {
 }
 
 void InstallFusibleWrappers() {
+  RegisterWrapper(OpKey{"aten::div", "Scalar"}, &WrapDivScalar);
+  RegisterWrapper(OpKey{"aten::native_dropout_backward", ""}, &WrapDropoutBackward);
   RegisterWrapper(OpKey{"aten::add", "Tensor"}, &WrapAddTensor);
   RegisterWrapper(OpKey{"aten::sub", "Tensor"}, &WrapSubTensor);
   RegisterWrapper(OpKey{"aten::mul", "Tensor"}, &WrapMulTensor);

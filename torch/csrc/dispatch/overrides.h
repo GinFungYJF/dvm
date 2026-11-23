@@ -39,6 +39,9 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
                           const at::Tensor &b);
 EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
                                 const at::Scalar &b);
+EmitResult DispatchExpandedDiv(const OpKey &key, const at::Tensor &input, const at::Scalar &divisor);
+EmitResult DispatchDropoutBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &mask,
+                                   double scale);
 EmitResult DispatchEq(const OpKey &key, const at::Tensor &a, const at::Tensor &b);
 EmitResult DispatchEqScalar(const OpKey &key, const at::Tensor &a, const at::Scalar &b);
 EmitResult DispatchMaskedFill(const OpKey &key, const at::Tensor &self, const at::Tensor &mask,

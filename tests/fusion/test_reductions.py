@@ -89,56 +89,61 @@ def test_standalone_reduction_gating(name, dims):
     with fused():
         dvm_torch.reset_stats()
         actual = fn(x) if dims is None else fn(x, dim=dims)
-    assert dvm_torch.stats()["emitted"] == (0 if name == "sum" else 1)
-    assert dvm_torch.stats()["flushes"] == (0 if name == "sum" else 1)
-    tolerance = 0 if name == "sum" else 1e-4
-    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
+    assert dvm_torch.stats()["emitted"] == 0
+    assert dvm_torch.stats()["flushes"] == 0
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @CUDA
+@pytest.mark.parametrize("name", ["sum", "mean"])
 @pytest.mark.parametrize("cached_input", [False, True])
-def test_sum_requires_a_producer_not_an_unrelated_pending_op(cached_input):
+def test_reduction_requires_a_producer_not_an_unrelated_pending_op(name, cached_input):
     x = torch.randn((32, 257), device="cuda")
     other = torch.randn_like(x)
     source = x if cached_input else other
+    fn = getattr(torch, name)
     with eager():
-        expected = x.sum(dim=0)
+        expected = fn(x, dim=0)
         product_expected = source * 2
     with fused():
         dvm_torch.reset_stats()
         product = source * 2
-        actual = x.sum(dim=0)
+        actual = fn(x, dim=0)
     assert dvm_torch.stats()["emitted"] == 1
     torch.testing.assert_close(product, product_expected)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @CUDA
-def test_sum_after_materialising_producer_uses_native_kernel():
+@pytest.mark.parametrize("name", ["sum", "mean"])
+def test_reduction_after_materialising_producer_uses_native_kernel(name):
     x = torch.randn((32, 257), device="cuda")
+    fn = getattr(torch, name)
     with eager():
-        expected = (x * 2).sum(dim=0)
+        expected = fn(x * 2, dim=0)
     with fused():
         product = x * 2
         dvm_torch.flush()
         dvm_torch.reset_stats()
-        actual = product.sum(dim=0)
+        actual = fn(product, dim=0)
     assert dvm_torch.stats()["emitted"] == 0
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @CUDA
-def test_sum_rechecks_producer_after_graph_trim():
+@pytest.mark.parametrize("name", ["sum", "mean"])
+def test_reduction_rechecks_producer_after_graph_trim(name):
     x = torch.ones((8, 33), device="cuda")
+    fn = getattr(torch, name)
     with fused():
         dvm_torch.reset_stats()
         pending = x
         for _ in range(62):
             pending = pending + 1
-        actual = pending.sum(dim=0)
+        actual = fn(pending, dim=0)
     assert dvm_torch.stats()["emitted"] == 62
     assert dvm_torch.stats()["by_reason"]["GraphTooLarge"] == 1
-    torch.testing.assert_close(actual, (x + 62).sum(dim=0), rtol=0, atol=0)
+    torch.testing.assert_close(actual, fn(x + 62, dim=0), rtol=0, atol=0)
 
 
 @CUDA
@@ -208,7 +213,7 @@ def test_reduce_broadcast_and_multiple_reductions():
     with fused():
         dvm_torch.reset_stats()
         actual = chain(x)
-    assert dvm_torch.stats()["emitted"] == 5
+    assert dvm_torch.stats()["emitted"] == 4
     assert dvm_torch.stats()["flushes"] == 1
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
 

@@ -209,6 +209,69 @@ EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &
   return out;
 }
 
+EmitResult EmitExpandedDiv(EmitCtx &ctx, const at::Tensor &input, const at::Scalar &divisor) {
+  if (!input.defined() || !input.is_cuda() || input.scalar_type() != at::kFloat ||
+      input.dim() == 0 || input.dim() > 10 || input.numel() == 0 ||
+      input.size(-1) <= 1 || input.stride(-1) != 0 || divisor.isComplex()) {
+    return std::nullopt;
+  }
+  const float constant = static_cast<float>(divisor.to<double>());
+  if (!std::isfinite(constant) || constant == 0.0f) {
+    return std::nullopt;
+  }
+
+  auto shape = input.sizes().vec();
+  auto strides = input.strides().vec();
+  shape.back() = 1;
+  strides.back() = 1;
+  int64_t expected_stride = 1;
+  for (int64_t dim = input.dim() - 1; dim >= 0; --dim) {
+    if (shape[dim] != 1 && strides[dim] != expected_stride) {
+      return std::nullopt;
+    }
+    expected_stride *= shape[dim];
+  }
+
+  at::Tensor compact;
+  {
+    // This view only describes the contiguous storage read by the graph.
+    GraphManager::NoFlushScope metadata_scope;
+    compact = input.as_strided(shape, strides, input.storage_offset());
+  }
+  // A zero-stride view can have the same shape/offset as a pending dense value.
+  // Never replace that entry with a compact Load of its uncomputed storage.
+  if (ctx.k->HasStorage(compact) && !ctx.k->IsExactPending(compact)) {
+    return std::nullopt;
+  }
+  auto *value = ctx.k->Read(compact);
+  auto *result = DivideByScalar(ctx.k->GetKernel(), value, constant, at::kFloat);
+  result = ctx.k->Broadcast(result, input.sizes().vec());
+  at::Tensor out = AllocateLike(input.sizes().vec(), at::kFloat, input);
+  ctx.k->Write(out, result);
+  ctx.k->AppendSignature(ctx.op_name);
+  return out;
+}
+
+EmitResult EmitDropoutBackward(EmitCtx &ctx, const at::Tensor &grad, const at::Tensor &mask,
+                               double scale) {
+  const float constant = static_cast<float>(scale);
+  if (!Eligible(grad) || grad.scalar_type() != at::kFloat || grad.numel() == 0 ||
+      !EligibleBool(mask) || grad.sizes() != mask.sizes() || grad.device() != mask.device() ||
+      !std::isfinite(constant)) {
+    return std::nullopt;
+  }
+  auto &kernel = ctx.k->GetKernel();
+  auto *g = ctx.k->Read(grad);
+  auto *m = kernel.Cast(ctx.k->Read(mask), dvm::kFloat32);
+  // Multiplication preserves NaN/Inf behavior even where the mask is false.
+  auto *masked = kernel.Binary<dvm::kMul>(g, m);
+  auto *result = kernel.Binary<dvm::kMul>(masked, constant);
+  at::Tensor out = AllocateLike(grad.sizes().vec(), at::kFloat, grad);
+  ctx.k->Write(out, result);
+  ctx.k->AppendSignature(ctx.op_name);
+  return out;
+}
+
 EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
                                const at::Tensor &b) {
   if (!Eligible(b) || !ScalarTypeIsFusable(b)) {
