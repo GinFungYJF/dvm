@@ -20,9 +20,11 @@
 #include <ATen/WrapDimUtilsMulti.h>
 
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include "adapter/adapter.h"
+#include "flags.h"
 
 namespace dvm_torch {
 namespace {
@@ -82,6 +84,87 @@ dvm::NDObject *DivideByScalar(dvm::Kernel &kernel, dvm::NDObject *input,
  */
 bool ScalarTypeIsFusable(const at::Tensor &t) { return IsFloatDtype(t); }
 
+std::optional<double> BinaryAlpha(dvm::BinaryType op, at::ScalarType dtype,
+                                  const at::Scalar &alpha) {
+  if (op != dvm::kAdd && op != dvm::kSub) {
+    return 1.0;
+  }
+  // Let the captured native kernel report invalid alpha types and overflow.
+  if (alpha.isBoolean() || alpha.isComplex()) {
+    return std::nullopt;
+  }
+  if (dtype == at::kInt) {
+    if (!alpha.isIntegral(false)) {
+      return std::nullopt;
+    }
+    const auto value = alpha.to<int64_t>();
+    // Native sub validates the negated alpha when lowering to add.
+    const int64_t low = op == dvm::kSub ? -int64_t{std::numeric_limits<int32_t>::max()}
+                                      : std::numeric_limits<int32_t>::min();
+    const int64_t high = op == dvm::kSub ? -int64_t{std::numeric_limits<int32_t>::min()}
+                                       : std::numeric_limits<int32_t>::max();
+    if (value < low || value > high) {
+      return std::nullopt;
+    }
+    return static_cast<double>(value);
+  }
+  const double value = alpha.to<double>();
+  if (std::isfinite(value) && std::abs(value) > std::numeric_limits<float>::max()) {
+    return std::nullopt;
+  }
+  const float scale = static_cast<float>(value);
+  // CUDA add/sub use FMA. Separate Mul and Add can round or overflow differently,
+  // so non-unit floating scales require the existing relaxed accuracy mode.
+  if (scale != 1.0f && GetAdapter().Capabilities().strict_accuracy && !GetFlags().compile_fast) {
+    return std::nullopt;
+  }
+  return scale;
+}
+
+dvm::NDObject *CastAddSubResult(dvm::Kernel &kernel, dvm::NDObject *result, dvm::DType dtype) {
+  if (dtype == dvm::kBFloat16 && dvm::Kernel::GetDType(result) == dvm::kFloat32) {
+    // The VM's BF16 rounding can turn some FP32 NaN payloads into zero/Inf.
+    // Canonicalise NaNs before narrowing the newly introduced FP32 arithmetic.
+    auto *is_nan = kernel.Binary<dvm::kNotEqual>(result, result);
+    auto *nan = kernel.Broadcast(std::numeric_limits<float>::quiet_NaN(),
+                                 dvm::Kernel::GetShape(result), dvm::kFloat32);
+    result = kernel.Select(is_nan, nan, result);
+  }
+  return kernel.Cast(result, dtype);
+}
+
+dvm::NDObject *ScaledAddSub(dvm::Kernel &kernel, dvm::BinaryType op, dvm::NDObject *left,
+                            dvm::NDObject *right, double alpha, dvm::DType dtype) {
+  if (alpha != 1.0) {
+    if (dtype == dvm::kInt32) {
+      const auto scale = static_cast<int32_t>(op == dvm::kSub ? -alpha : alpha);
+      right = kernel.Binary<dvm::kMul>(right, scale);
+      return kernel.Binary<dvm::kAdd>(left, right);
+    } else {
+      // Keep the product in FP32 until the add/sub result is rounded back.
+      left = kernel.Cast(left, dvm::kFloat32);
+      right = kernel.Cast(right, dvm::kFloat32);
+      right = kernel.Binary<dvm::kMul>(right, static_cast<float>(alpha));
+    }
+  }
+  auto *result = op == dvm::kAdd ? kernel.Binary<dvm::kAdd>(left, right)
+                                : kernel.Binary<dvm::kSub>(left, right);
+  return CastAddSubResult(kernel, result, dtype);
+}
+
+dvm::NDObject *ScaledAddSubScalar(dvm::Kernel &kernel, dvm::BinaryType op,
+                                  dvm::NDObject *left, float right, double alpha) {
+  const auto dtype = dvm::Kernel::GetDType(left);
+  // Wrapped and direct scalar operands are evaluated in the opmath dtype.
+  left = kernel.Cast(left, dvm::kFloat32);
+  if (alpha != 1.0) {
+    right *= static_cast<float>(alpha);
+  }
+  auto *result = op == dvm::kAdd ? kernel.Binary<dvm::kAdd>(left, right)
+                                : kernel.Binary<dvm::kSub>(left, right);
+  return CastAddSubResult(kernel, result, dtype);
+}
+
 bool EligibleBool(const at::Tensor &t) {
   return t.defined() && t.is_cuda() && t.is_contiguous() && t.dim() <= 10 &&
          t.scalar_type() == at::kBool && t.numel() != 0;
@@ -130,7 +213,7 @@ bool IsFloatDtype(const at::Tensor &t) {
 bool IsIntegerDtype(const at::Tensor &t) { return t.scalar_type() == at::kInt; }
 
 EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
-                      const at::Tensor &b) {
+                      const at::Tensor &b, const at::Scalar &alpha) {
   if (!Eligible(a) || !Eligible(b)) {
     return std::nullopt;
   }
@@ -146,13 +229,18 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
   if (!out_shape) {
     return std::nullopt;
   }
+  auto scale = BinaryAlpha(op, a.scalar_type(), alpha);
+  if (!scale) {
+    return std::nullopt;
+  }
 
   dvm::NDObject *la = ctx.k->Read(a);
   dvm::NDObject *lb = ctx.k->Read(b);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {
-      case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(la, lb);
-      case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(la, lb);
+      case dvm::kAdd:
+      case dvm::kSub:
+        return ScaledAddSub(ctx.k->GetKernel(), op, la, lb, *scale, ToDvmDtype(a.scalar_type()));
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(la, lb);
       case dvm::kDiv: return ctx.k->GetKernel().Binary<dvm::kDiv>(la, lb);
       case dvm::kMaximum: return ctx.k->GetKernel().Binary<dvm::kMaximum>(la, lb);
@@ -179,8 +267,12 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
 }
 
 EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
-                            const at::Scalar &b) {
-  if (!Eligible(a) || !ScalarTypeIsFusable(a)) {
+                            const at::Scalar &b, const at::Scalar &alpha) {
+  if (!Eligible(a) || !ScalarTypeIsFusable(a) || b.isComplex() || (op == dvm::kSub && b.isBoolean())) {
+    return std::nullopt;
+  }
+  auto scale = BinaryAlpha(op, a.scalar_type(), alpha);
+  if (!scale) {
     return std::nullopt;
   }
   // A Python scalar does not participate in dtype promotion: `fp16 * 2.0` stays
@@ -189,8 +281,8 @@ EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &
   dvm::NDObject *la = ctx.k->Read(a);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {
-      case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(la, constant);
-      case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(la, constant);
+      case dvm::kAdd:
+      case dvm::kSub: return ScaledAddSubScalar(ctx.k->GetKernel(), op, la, constant, *scale);
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(la, constant);
       case dvm::kDiv: return DivideByScalar(ctx.k->GetKernel(), la, constant, a.scalar_type());
       case dvm::kMaximum: return ctx.k->GetKernel().Binary<dvm::kMaximum>(la, constant);
@@ -273,13 +365,23 @@ EmitResult EmitDropoutBackward(EmitCtx &ctx, const at::Tensor &grad, const at::T
 }
 
 EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
-                               const at::Tensor &b) {
-  if (!Eligible(b) || !ScalarTypeIsFusable(b)) {
+                               const at::Tensor &b, const at::Scalar &alpha) {
+  if (!Eligible(b) || !ScalarTypeIsFusable(b) || a.isComplex() || (op == dvm::kSub && a.isBoolean())) {
+    return std::nullopt;
+  }
+  auto scale = BinaryAlpha(op, b.scalar_type(), alpha);
+  if (!scale) {
     return std::nullopt;
   }
   const float constant = a.to<float>();
   dvm::NDObject *lb = ctx.k->Read(b);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
+    if (op == dvm::kAdd || op == dvm::kSub) {
+      auto &kernel = ctx.k->GetKernel();
+      auto *left = kernel.Broadcast(constant, dvm::Kernel::GetShape(lb), dvm::kFloat32);
+      return ScaledAddSub(kernel, op, left, kernel.Cast(lb, dvm::kFloat32), *scale,
+                          ToDvmDtype(b.scalar_type()));
+    }
     switch (op) {
       case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(constant, lb);
       case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(constant, lb);
@@ -587,7 +689,7 @@ EmitResult EmitReduction(EmitCtx &ctx, const at::Tensor &a, at::OptionalIntArray
 }
 
 EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
-                             const at::Tensor &other) {
+                             const at::Tensor &other, const at::Scalar &alpha) {
   if (!Eligible(self) || !Eligible(other)) {
     return std::nullopt;
   }
@@ -600,13 +702,18 @@ EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
   if (!shape || at::IntArrayRef(*shape) != self.sizes()) {
     return std::nullopt;
   }
+  auto scale = BinaryAlpha(op, self.scalar_type(), alpha);
+  if (!scale) {
+    return std::nullopt;
+  }
 
   dvm::NDObject *ls = ctx.k->Read(self);
   dvm::NDObject *lo = ctx.k->Read(other);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {
-      case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(ls, lo);
-      case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(ls, lo);
+      case dvm::kAdd:
+      case dvm::kSub:
+        return ScaledAddSub(ctx.k->GetKernel(), op, ls, lo, *scale, ToDvmDtype(self.scalar_type()));
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(ls, lo);
       case dvm::kDiv: return ctx.k->GetKernel().Binary<dvm::kDiv>(ls, lo);
       case dvm::kMaximum: return ctx.k->GetKernel().Binary<dvm::kMaximum>(ls, lo);
@@ -623,16 +730,21 @@ EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
 }
 
 EmitResult EmitBinaryInplaceScalar(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
-                                   const at::Scalar &other) {
-  if (!Eligible(self) || !ScalarTypeIsFusable(self)) {
+                                   const at::Scalar &other, const at::Scalar &alpha) {
+  if (!Eligible(self) || !ScalarTypeIsFusable(self) || other.isComplex() ||
+      (op == dvm::kSub && other.isBoolean())) {
+    return std::nullopt;
+  }
+  auto scale = BinaryAlpha(op, self.scalar_type(), alpha);
+  if (!scale) {
     return std::nullopt;
   }
   const float constant = other.to<float>();
   dvm::NDObject *ls = ctx.k->Read(self);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {
-      case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(ls, constant);
-      case dvm::kSub: return ctx.k->GetKernel().Binary<dvm::kSub>(ls, constant);
+      case dvm::kAdd:
+      case dvm::kSub: return ScaledAddSubScalar(ctx.k->GetKernel(), op, ls, constant, *scale);
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(ls, constant);
       case dvm::kDiv: return DivideByScalar(ctx.k->GetKernel(), ls, constant, self.scalar_type());
       default: return nullptr;

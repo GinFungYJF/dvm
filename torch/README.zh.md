@@ -95,6 +95,16 @@ Tensor-Tensor `add`/`add_` 和归约（`sum`/`mean`）仅在输入由当前待�
 因此，以原生 add 开头的 add → mean 也会整体走原生；消费 pending 输入的 add 和
 归约仍可融合。
 
+`add`/`sub` 及其原地版本的 Tensor、Scalar 入口均支持传入 `alpha`。Tensor 输入
+在同一图内缩放右操作数；Scalar 输入将系数折叠到常量。Int32 Tensor 输入保持
+整数运算，并保留原生系数范围检查（减法检查 `-alpha`）；FP16/BF16 的缩放加减
+使用 FP32 中间值，最后转换回输出类型。
+
+浮点张量的非 1 alpha 需要 `compile_fast=True`。CUDA 原生 kernel 使用 FMA，
+当前 VM 则执行分开的乘法和加减法，在舍入、抵消及中间溢出时可能有不同结果；
+默认模式对此保留原生执行。非法 alpha 类型、alpha 转换溢出以及不支持的 dtype
+或布局也保留原生检查与回退，生产者筛选和别名规则继续适用。
+
 `detach` 调用原生元数据操作并保留待执行计算，使 storage 别名和版本计数保持
 PyTorch 语义。通过 detached 别名写入以及需要读取实际数据的消费者，仍会按需
 触发 flush。可通过 `disable_ops="detach"` 恢复 detach 处的 flush。

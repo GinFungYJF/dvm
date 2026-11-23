@@ -206,7 +206,7 @@ void FlushForFallback(FlushReason reason) {
 }
 
 EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
-                          const at::Tensor &b) {
+                          const at::Tensor &b, const at::Scalar &alpha) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
   // A Python scalar reaches the dispatcher as a 0-dim CPU tensor. It cannot be
@@ -219,14 +219,14 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
     if (op == dvm::kDiv && !a.is_contiguous()) {
       return EmitExpandedDiv(ctx, a, b.item());
     }
-    return EmitBinaryScalar(ctx, op, a, b.item());
+    return EmitBinaryScalar(ctx, op, a, b.item(), alpha);
   }
   if (IsWrappedScalar(a)) {
     if (!Prepare(key, {b}, &k)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
-    return EmitBinaryScalarLhs(ctx, op, a.item(), b);
+    return EmitBinaryScalarLhs(ctx, op, a.item(), b, alpha);
   }
   if (!Prepare(key, {a, b}, &k)) {
     return std::nullopt;
@@ -237,11 +237,11 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
-  return EmitBinary(ctx, op, a, b);
+  return EmitBinary(ctx, op, a, b, alpha);
 }
 
 EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tensor &self,
-                                 const at::Tensor &other) {
+                                 const at::Tensor &other, const at::Scalar &alpha) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
   if (IsWrappedScalar(other)) {
@@ -249,7 +249,7 @@ EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tenso
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
-    return EmitBinaryInplaceScalar(ctx, op, self, other.item());
+    return EmitBinaryInplaceScalar(ctx, op, self, other.item(), alpha);
   }
   // add_ can consume a pending read operand when self is outside the graph.
   // Keep the conservative boundary on both operands for other in-place ops.
@@ -261,18 +261,29 @@ EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tenso
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
-  return EmitBinaryInplace(ctx, op, self, other);
+  return EmitBinaryInplace(ctx, op, self, other, alpha);
 }
 
 EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
-                                const at::Scalar &b) {
+                                const at::Scalar &b, const at::Scalar &alpha) {
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
   if (!Prepare(key, {a}, &k) || b.isComplex()) {
     return std::nullopt;
   }
   EmitCtx ctx{k, key.name.c_str()};
-  return EmitBinaryScalar(ctx, op, a, b);
+  return EmitBinaryScalar(ctx, op, a, b, alpha);
+}
+
+EmitResult DispatchBinaryInplaceScalar(const OpKey &key, dvm::BinaryType op, at::Tensor &self,
+                                       const at::Scalar &other, const at::Scalar &alpha) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {self}, &k, 1)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitBinaryInplaceScalar(ctx, op, self, other, alpha);
 }
 
 EmitResult DispatchExpandedDiv(const OpKey &key, const at::Tensor &input, const at::Scalar &divisor) {
@@ -458,10 +469,8 @@ namespace {
 
 at::Tensor WrapAddTensor(const at::Tensor &a, const at::Tensor &b, const at::Scalar &alpha) {
   static const OpKey kKey{"aten::add", "Tensor"};
-  if (alpha.to<double>() == 1.0) {
-    if (auto out = DispatchBinary(kKey, dvm::kAdd, a, b); out.has_value()) {
-      return *out;
-    }
+  if (auto out = DispatchBinary(kKey, dvm::kAdd, a, b, alpha); out.has_value()) {
+    return *out;
   }
   FlushForFallback(FlushReason::kNonFusibleOp);
   return CallOriginal<at::Tensor>(kKey, a, b, alpha);
@@ -469,10 +478,26 @@ at::Tensor WrapAddTensor(const at::Tensor &a, const at::Tensor &b, const at::Sca
 
 at::Tensor WrapSubTensor(const at::Tensor &a, const at::Tensor &b, const at::Scalar &alpha) {
   static const OpKey kKey{"aten::sub", "Tensor"};
-  if (alpha.to<double>() == 1.0) {
-    if (auto out = DispatchBinary(kKey, dvm::kSub, a, b); out.has_value()) {
-      return *out;
-    }
+  if (auto out = DispatchBinary(kKey, dvm::kSub, a, b, alpha); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, a, b, alpha);
+}
+
+at::Tensor WrapAddScalar(const at::Tensor &a, const at::Scalar &b, const at::Scalar &alpha) {
+  static const OpKey kKey{"aten::add", "Scalar"};
+  if (auto out = DispatchBinaryScalar(kKey, dvm::kAdd, a, b, alpha); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, a, b, alpha);
+}
+
+at::Tensor WrapSubScalar(const at::Tensor &a, const at::Scalar &b, const at::Scalar &alpha) {
+  static const OpKey kKey{"aten::sub", "Scalar"};
+  if (auto out = DispatchBinaryScalar(kKey, dvm::kSub, a, b, alpha); out.has_value()) {
+    return *out;
   }
   FlushForFallback(FlushReason::kNonFusibleOp);
   return CallOriginal<at::Tensor>(kKey, a, b, alpha);
@@ -723,10 +748,8 @@ at::Tensor &WrapMaskedFillInplace(at::Tensor &self, const at::Tensor &mask, cons
 
 at::Tensor &WrapAddInplace(at::Tensor &self, const at::Tensor &other, const at::Scalar &alpha) {
   static const OpKey kKey{"aten::add_", "Tensor"};
-  if (alpha.to<double>() == 1.0) {
-    if (auto out = DispatchBinaryInplace(kKey, dvm::kAdd, self, other); out.has_value()) {
-      return self;
-    }
+  if (auto out = DispatchBinaryInplace(kKey, dvm::kAdd, self, other, alpha); out.has_value()) {
+    return self;
   }
   FlushForFallback(FlushReason::kWriteAlias);
   c10::Stack stack;
@@ -739,10 +762,36 @@ at::Tensor &WrapAddInplace(at::Tensor &self, const at::Tensor &other, const at::
 
 at::Tensor &WrapSubInplace(at::Tensor &self, const at::Tensor &other, const at::Scalar &alpha) {
   static const OpKey kKey{"aten::sub_", "Tensor"};
-  if (alpha.to<double>() == 1.0) {
-    if (auto out = DispatchBinaryInplace(kKey, dvm::kSub, self, other); out.has_value()) {
-      return self;
-    }
+  if (auto out = DispatchBinaryInplace(kKey, dvm::kSub, self, other, alpha); out.has_value()) {
+    return self;
+  }
+  FlushForFallback(FlushReason::kWriteAlias);
+  c10::Stack stack;
+  stack.push_back(self);
+  stack.push_back(other);
+  stack.push_back(alpha);
+  CallOriginalBoxed(kKey, &stack);
+  return self;
+}
+
+at::Tensor &WrapAddInplaceScalar(at::Tensor &self, const at::Scalar &other, const at::Scalar &alpha) {
+  static const OpKey kKey{"aten::add_", "Scalar"};
+  if (auto out = DispatchBinaryInplaceScalar(kKey, dvm::kAdd, self, other, alpha); out.has_value()) {
+    return self;
+  }
+  FlushForFallback(FlushReason::kWriteAlias);
+  c10::Stack stack;
+  stack.push_back(self);
+  stack.push_back(other);
+  stack.push_back(alpha);
+  CallOriginalBoxed(kKey, &stack);
+  return self;
+}
+
+at::Tensor &WrapSubInplaceScalar(at::Tensor &self, const at::Scalar &other, const at::Scalar &alpha) {
+  static const OpKey kKey{"aten::sub_", "Scalar"};
+  if (auto out = DispatchBinaryInplaceScalar(kKey, dvm::kSub, self, other, alpha); out.has_value()) {
+    return self;
   }
   FlushForFallback(FlushReason::kWriteAlias);
   c10::Stack stack;
@@ -811,6 +860,8 @@ void InstallFusibleWrappers() {
   RegisterWrapper(OpKey{"aten::native_dropout_backward", ""}, &WrapDropoutBackward);
   RegisterWrapper(OpKey{"aten::add", "Tensor"}, &WrapAddTensor);
   RegisterWrapper(OpKey{"aten::sub", "Tensor"}, &WrapSubTensor);
+  RegisterWrapper(OpKey{"aten::add", "Scalar"}, &WrapAddScalar);
+  RegisterWrapper(OpKey{"aten::sub", "Scalar"}, &WrapSubScalar);
   RegisterWrapper(OpKey{"aten::mul", "Tensor"}, &WrapMulTensor);
   RegisterWrapper(OpKey{"aten::mul", "Scalar"}, &WrapMulScalar);
   RegisterWrapper(OpKey{"aten::detach", ""}, &WrapDetach);
@@ -843,6 +894,8 @@ void InstallFusibleWrappers() {
   RegisterWrapper(OpKey{"aten::mean", "dim"}, &WrapMeanDim);
   RegisterWrapper(OpKey{"aten::add_", "Tensor"}, &WrapAddInplace);
   RegisterWrapper(OpKey{"aten::sub_", "Tensor"}, &WrapSubInplace);
+  RegisterWrapper(OpKey{"aten::add_", "Scalar"}, &WrapAddInplaceScalar);
+  RegisterWrapper(OpKey{"aten::sub_", "Scalar"}, &WrapSubInplaceScalar);
   RegisterWrapper(OpKey{"aten::mul_", "Tensor"}, &WrapMulInplace);
   RegisterWrapper(OpKey{"aten::div_", "Tensor"}, &WrapDivInplace);
   RegisterWrapper(OpKey{"aten::relu_", ""}, &WrapReluInplace);

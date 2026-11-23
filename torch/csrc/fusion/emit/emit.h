@@ -48,12 +48,13 @@ bool IsIntegerDtype(const at::Tensor &t);
 /** True for a 0-dim CPU tensor, which is how Python scalars reach the dispatcher. */
 bool IsWrappedScalar(const at::Tensor &t);
 
-EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a, const at::Tensor &b);
+EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a, const at::Tensor &b,
+                      const at::Scalar &alpha = 1);
 /** Scalar operand form: `x * 2.0`, `x + 1`, ... */
 EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
-                            const at::Scalar &b);
+                            const at::Scalar &b, const at::Scalar &alpha = 1);
 EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
-                               const at::Tensor &b);
+                               const at::Tensor &b, const at::Scalar &alpha = 1);
 /** FP32 scalar division of a compact input expanded along its last dimension. */
 EmitResult EmitExpandedDiv(EmitCtx &ctx, const at::Tensor &input, const at::Scalar &divisor);
 EmitResult EmitDropoutBackward(EmitCtx &ctx, const at::Tensor &grad, const at::Tensor &mask,
@@ -77,9 +78,9 @@ EmitResult EmitReduction(EmitCtx &ctx, const at::Tensor &a, at::OptionalIntArray
 
 /** In-place variants: the result is `self` with its storage updated. */
 EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
-                             const at::Tensor &other);
+                             const at::Tensor &other, const at::Scalar &alpha = 1);
 EmitResult EmitBinaryInplaceScalar(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
-                                   const at::Scalar &other);
+                                   const at::Scalar &other, const at::Scalar &alpha = 1);
 EmitResult EmitReluInplace(EmitCtx &ctx, at::Tensor &self);
 
 }  // namespace dvm_torch

@@ -36,9 +36,9 @@ namespace dvm_torch {
  * runs the captured original kernel.
  */
 EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
-                          const at::Tensor &b);
+                          const at::Tensor &b, const at::Scalar &alpha = 1);
 EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::Tensor &a,
-                                const at::Scalar &b);
+                                const at::Scalar &b, const at::Scalar &alpha = 1);
 EmitResult DispatchExpandedDiv(const OpKey &key, const at::Tensor &input, const at::Scalar &divisor);
 EmitResult DispatchDropoutBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &mask,
                                    double scale);
@@ -47,7 +47,7 @@ EmitResult DispatchEqScalar(const OpKey &key, const at::Tensor &a, const at::Sca
 EmitResult DispatchMaskedFill(const OpKey &key, const at::Tensor &self, const at::Tensor &mask,
                               const at::Scalar &value, bool inplace);
 EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tensor &self,
-                                 const at::Tensor &other);
+                                 const at::Tensor &other, const at::Scalar &alpha = 1);
 EmitResult DispatchUnary(const OpKey &key, dvm::UnaryType op, const at::Tensor &a);
 EmitResult DispatchNeg(const OpKey &key, const at::Tensor &a);
 EmitResult DispatchRelu(const OpKey &key, const at::Tensor &a);

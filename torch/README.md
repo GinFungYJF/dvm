@@ -110,6 +110,19 @@ read views that do not match the stored tensor metadata still flush. This policy
 also sends an initial native add followed by mean to native kernels, while
 retaining add and reductions that consume pending values.
 
+`add`/`sub` and their in-place variants accept `alpha` through both Tensor and
+Scalar overloads. Tensor inputs use a scaled right operand inside the same graph;
+scalar inputs fold the scale into a constant. Int32 Tensor inputs keep integer
+arithmetic and native alpha range checks (subtraction checks `-alpha`). FP16/BF16
+scaled arithmetic uses FP32 intermediates before casting the result back.
+
+For floating-point tensors, non-unit alpha requires `compile_fast=True`. CUDA's
+native kernels use FMA, while the current VM executes separate multiply and add/subtract
+instructions; rounding, cancellation, and intermediate overflow can differ.
+The default mode forwards these cases to native kernels. Invalid alpha types,
+overflowing alpha conversions, and unsupported dtype/layout combinations also
+retain native validation and fallback. Existing producer and alias checks apply.
+
 `detach` preserves pending computation while calling the native metadata operation,
 so storage aliases and version counters retain PyTorch semantics. Writes through
 detached aliases and consumers that require materialized data still flush as
