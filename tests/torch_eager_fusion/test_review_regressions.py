@@ -83,33 +83,6 @@ def test_int_tensor_true_division_promotes():
 
 
 @CUDA
-def test_disable_ops_actually_disables():
-    """`disable_ops=mul` uses the bare name; it must match aten::mul."""
-    a = torch.randn(256, device="cuda")
-    b = torch.randn(256, device="cuda")
-    dvm_torch.enable(disable_ops="mul")
-    try:
-        dvm_torch.reset_stats()
-        _ = a * b
-        assert dvm_torch.stats()["emitted"] == 0, "mul was fused despite disable_ops"
-    finally:
-        dvm_torch.disable()
-
-
-@CUDA
-def test_enable_ops_actually_restricts():
-    a = torch.randn(256, device="cuda")
-    b = torch.randn(256, device="cuda")
-    dvm_torch.enable(enable_ops="add")
-    try:
-        dvm_torch.reset_stats()
-        _ = a * b
-        assert dvm_torch.stats()["emitted"] == 0, "mul was fused despite enable_ops=add"
-    finally:
-        dvm_torch.disable()
-
-
-@CUDA
 def test_single_op_graph_is_compiled():
     """A live single-op graph also executes through DVM."""
     a = torch.randn(4096, device="cuda")

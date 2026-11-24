@@ -25,26 +25,18 @@ from conftest import CUDA, assert_same, eager, fused
 
 
 @CUDA
-def test_disabled_matches_eager():
-    a = torch.randn(512, device="cuda")
-    b = torch.randn(512, device="cuda")
-    with eager():
-        expected = a * b + 1
-    with eager():
-        actual = a * b + 1
-    assert_same(actual, expected)
-
-
-@CUDA
 def test_disabled_records_no_graph():
     dvm_torch.disable()
+    a = torch.arange(512, device="cuda", dtype=torch.float32)
+    expected = a * 32 + 31
     dvm_torch.reset_stats()
-    a = torch.randn(512, device="cuda")
+    actual = a
     for _ in range(5):
-        a = a * 2 + 1
+        actual = actual * 2 + 1
     stats = dvm_torch.stats()
     assert stats["flushes"] == 0
     assert stats["emitted"] == 0
+    assert_same(actual, expected)
 
 
 @CUDA
@@ -59,24 +51,26 @@ def test_disable_restores_dispatch():
 
 
 @CUDA
-def test_disable_ops_option():
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({"disable_ops": "mul"}, id="disable-mul"),
+        pytest.param({"enable_ops": "add"}, id="enable-add"),
+    ],
+)
+def test_op_filter(options):
     a = torch.randn(256, device="cuda")
     b = torch.randn(256, device="cuda")
     with eager():
-        expected = a * b
-    with fused(disable_ops="mul"):
-        actual = a * b
-    assert_same(actual, expected)
-
-
-@CUDA
-def test_enable_ops_option():
-    a = torch.randn(256, device="cuda")
-    b = torch.randn(256, device="cuda")
-    with eager():
-        expected = a + b
-    with fused(enable_ops="add"):
-        actual = a + b
+        expected_product = a * b
+        expected = (expected_product + 1) + b
+    with fused(**options):
+        dvm_torch.reset_stats()
+        product = a * b
+        assert dvm_torch.stats()["emitted"] == 0
+        actual = (product + 1) + b
+    assert dvm_torch.stats()["graph_sizes"] == {2: 1}
+    assert_same(product, expected_product)
     assert_same(actual, expected)
 
 

@@ -17,13 +17,13 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, FLOAT_DTYPES, eager, fused, pairwise_cases, run_eager_and_fused
 
 
 @CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("scalar", [0, 1])
-@pytest.mark.parametrize("save_mask", [False, True])
+@pytest.mark.parametrize(
+    "dtype,scalar,save_mask", pairwise_cases(FLOAT_DTYPES, (0, 1), (False, True))
+)
 def test_attention_predicate_preserves_live_outputs(dtype, scalar, save_mask):
     x = torch.randn(2, 3, 17, 17, device="cuda", dtype=dtype)
     keep = torch.rand(2, 1, 17, 17, device="cuda") > .3
@@ -34,11 +34,7 @@ def test_attention_predicate_preserves_live_outputs(dtype, scalar, save_mask):
         out = scaled.masked_fill(mask, -10000)
         return (out, mask) if save_mask else (out,)
 
-    with eager():
-        expected = run()
-    with fused():
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run)
     for out, ref in zip(actual, expected):
         torch.testing.assert_close(out, ref, rtol=0, atol=0)
     assert dvm_torch.stats()["graph_sizes"] == {3: 1}

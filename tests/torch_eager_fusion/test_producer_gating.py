@@ -17,13 +17,13 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, FLOAT_DTYPES, eager, fused, pairwise_cases, run_eager_and_fused
 
 
 @CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("shape", [(), (8, 17)])
-@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize(
+    "dtype,shape,inplace", pairwise_cases(FLOAT_DTYPES, ((), (8, 17)), (False, True))
+)
 def test_tensor_add_without_producer_is_native(dtype, shape, inplace):
     x = torch.randn(shape, device="cuda", dtype=dtype)
     other = torch.randn(shape[-1:] if shape else (), device="cuda", dtype=dtype)
@@ -55,11 +55,7 @@ def test_tensor_add_consumes_pending_broadcast_inputs(dtype, producer):
         right = bias * 2 if producer in ("right", "both") else bias
         return left + right
 
-    with eager():
-        expected = run()
-    with fused():
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run)
     assert dvm_torch.stats()["graph_sizes"] == {3 if producer == "both" else 2: 1}
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -84,11 +80,7 @@ def test_tensor_add_does_not_consume_a_load_as_a_producer(cached_input):
 @CUDA
 def test_native_add_followed_by_mean_remains_native():
     x, y = [torch.randn(8, 17, device="cuda") for _ in range(2)]
-    with eager():
-        expected = (x + y).mean(-1)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = (x + y).mean(-1)
+    actual, expected = run_eager_and_fused(lambda: (x + y).mean(-1))
     assert dvm_torch.stats()["emitted"] == 0
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -176,9 +168,9 @@ def test_std_backward_splits_at_native_mean_and_preserves_inplace_output():
 
 
 @CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("broadcast", [False, True])
-@pytest.mark.parametrize("retain_rhs", [False, True])
+@pytest.mark.parametrize(
+    "dtype,broadcast,retain_rhs", pairwise_cases(FLOAT_DTYPES, (False, True), (False, True))
+)
 def test_add_inplace_consumes_pending_read_operand(dtype, broadcast, retain_rhs):
     target = torch.randn(8, 17, device="cuda", dtype=dtype)
     source = torch.randn((17,) if broadcast else (8, 17), device="cuda", dtype=dtype)

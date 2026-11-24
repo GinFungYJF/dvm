@@ -8,4 +8,4 @@ requires-dvm-rt = true
 cuda-minimum = "12.0"
 
 [tool.pytest.ini_options]
-testpaths = ["../../tests/fusion"]
+testpaths = ["../../tests/torch_eager_fusion"]

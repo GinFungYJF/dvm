@@ -18,18 +18,14 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, eager, fused, run_eager_and_fused
 
 
 @CUDA
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_mul_scalar_overload_joins_chain(dtype):
     x = torch.randn(8, 17, device="cuda", dtype=dtype)
-    with eager():
-        expected = torch.ops.aten.mul.Scalar(x + 1, 2.0) - 3
-    with fused():
-        dvm_torch.reset_stats()
-        actual = torch.ops.aten.mul.Scalar(x + 1, 2.0) - 3
+    actual, expected = run_eager_and_fused(lambda: torch.ops.aten.mul.Scalar(x + 1, 2.0) - 3)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert dvm_torch.stats()["graph_sizes"] == {3: 1}
 

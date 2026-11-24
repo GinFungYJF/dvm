@@ -17,7 +17,7 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, eager, fused, run_eager_and_fused
 
 
 def assert_exact_with_zero_sign(actual, expected):
@@ -34,11 +34,7 @@ def test_neg_preserves_special_values_and_zero_sign(dtype):
                       info.tiny * info.eps, -info.tiny * info.eps,
                       info.max, -info.max, float("inf"), -float("inf")],
                      device="cuda", dtype=dtype)
-    with eager():
-        expected = -x
-    with fused():
-        dvm_torch.reset_stats()
-        actual = -x
+    actual, expected = run_eager_and_fused(lambda: -x)
     assert dvm_torch.stats()["emitted"] == 1
     assert_exact_with_zero_sign(actual, expected)
 

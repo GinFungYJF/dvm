@@ -35,21 +35,6 @@ TORCH_DVM_FUSION="True" python train.py
 TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 ```
 
-Captured graphs execute through DVM at flush time, including single-operator
-graphs. Dead-store elimination skips writes to intermediate tensors that are no
-longer observable, while preserving live aliases and autograd saved values.
-Use `dvm_torch.enable(disable_ops="sum")` to keep selected operators native.
-
-The GPU backend can encode a single eager vector kernel as one `Pointwise.fp32`
-VM instruction. The compact CUDA entry executes two to eight FP32 adds, subtracts,
-multiplies or divides, including scalar, row and last-dimension broadcasts. It
-processes four adjacent elements at a time, so the output width must be a multiple
-of four and packed accesses must be 16-byte aligned. The instruction supports
-multiple outputs, up to two saved intermediate values and an exact dense in-place
-update at the final operation. Selection is automatic when fusion is enabled.
-Other graphs use normal VM code generation. Set `DVM_GPU_POINTWISE=0` before
-starting the process to compare against the regular VM.
-
 ## Architecture
 
 | Layer | Location | Responsibility |
@@ -57,10 +42,6 @@ starting the process to compare against the regular VM.
 | L1 | `include/`, `src/` | Pure C++: `dvm::Kernel`, code generation, and kernel launch. **No torch dependency.** |
 | L2 | `torch/csrc/fusion/` | Device-independent fusion core: `SideTable`, `GraphKernel`, `GraphManager`, `OpEmitter`, `TrimPolicy` |
 | L3 | `torch/csrc/dispatch/` | ATen CUDA dispatch key overrides, original kernel capture, coverage guards, and environment-variable gating |
-
-`L1` has no knowledge of `L2`, and `L2` has no knowledge of `L3`. The `core-purity`
-check ensures that `include/` and `src/` contain no references to `torch/`, `at::`,
-`c10::`, or `ATen`.
 
 ## Correctness Mechanisms
 
@@ -83,69 +64,14 @@ Fusible operators with handwritten unboxed wrappers:
 `sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `clamp` `round` `floor`
 `ceil` `trunc` `sum` `mean` `native_dropout_backward`, plus `add_` `sub_` `mul_` `div_` `relu_`.
 
-`mul.Scalar` is covered as well as `mul.Tensor`. `eq.Tensor` / `eq.Scalar`
-accept matching floating-point or Bool inputs; Bool scalar comparisons fuse for
-0 and 1. `masked_fill.Scalar` / `masked_fill_.Scalar` accept floating-point data
-and a broadcastable Bool mask. These paths require nonempty contiguous CUDA
-inputs; mixed dtypes, integer comparisons, Tensor fill values and unsupported
-layouts fall back to native kernels.
-
-Scalar division also accepts an FP32 input expanded along its last dimension
-when collapsing that dimension leaves contiguous storage. Both `div.Scalar` and
-the wrapped-scalar `div.Tensor` path load the compact input, divide, and broadcast
-inside the graph. The divisor must be finite and nonzero in FP32. Other strided
-layouts use native kernels; expanded tensors are never used as write targets.
-
-`native_dropout_backward` joins an existing gradient producer for nonempty,
-contiguous FP32 gradients and a matching contiguous Bool mask, with a finite FP32
-scale. This enables broadcast division → `add_` → dropout backward to fuse while
-standalone dropout backward remains native. Live accumulation results and aliases
-are still written back; dead intermediate stores are removed.
-
-`masked_fill_` can update an exact pending result within its producing graph when
-that storage has no memory Load in the graph. Earlier consumers retain their old
-value nodes, and later consumers see the updated value. Writes to previously
-loaded storage and mismatched overlapping views still flush before proceeding.
-
-When a pending Bool scalar comparison to 0 or 1 feeds `masked_fill`, the emitter uses
-the original Boolean condition and adjusts the Select branches. Saved masks and
-other live comparison results are still materialized for their consumers.
-
-Tensor-Tensor `add`/`add_` and reductions (`sum`/`mean`) join a graph only when an
-input is produced by that pending graph. Otherwise they run natively. Scalar add
-paths remain eligible to start graphs. The check follows stream, alias and graph
-size boundaries. Tensor-Tensor `add_` can consume an exact pending read operand
-when its destination storage is outside the graph; writes to graph storage and
-read views that do not match the stored tensor metadata still flush. This policy
-also sends an initial native add followed by mean to native kernels, while
-retaining add and reductions that consume pending values.
-
-`add`/`sub` and their in-place variants accept `alpha` through both Tensor and
-Scalar overloads. Tensor inputs use a scaled right operand inside the same graph;
-scalar inputs fold the scale into a constant. Int32 Tensor inputs keep integer
-arithmetic and native alpha range checks (subtraction checks `-alpha`). FP16/BF16
-scaled arithmetic uses FP32 intermediates before casting the result back.
-
-For floating-point tensors, non-unit alpha requires `compile_fast=True`. CUDA's
-native kernels use FMA, while the current VM executes separate multiply and add/subtract
-instructions; rounding, cancellation, and intermediate overflow can differ.
-The default mode forwards these cases to native kernels. Invalid alpha types,
-overflowing alpha conversions, and unsupported dtype/layout combinations also
-retain native validation and fallback. Existing producer and alias checks apply.
-
-`detach` preserves pending computation while calling the native metadata operation,
-so storage aliases and version counters retain PyTorch semantics. Writes through
-detached aliases and consumers that require materialized data still flush as
-needed. Use `disable_ops="detach"` to retain a flush at detach calls.
-
 Other ATen operators use a generic guard: **flush first, then forward to the original
 kernel captured before registration**.
 
 Known limitations:
 
 - Fusion accepts contiguous, dense CUDA tensors with at most 10 dimensions,
-  matching DVM's shape storage capacity. The read-only scalar division broadcast
-  described above is the supported exception to contiguous input layout.
+  matching DVM's shape storage capacity. Scalar division can also read an FP32
+  tensor expanded along its last dimension from contiguous storage.
 - `int64` arithmetic is not fused because the GPU VM has no int64 arithmetic instructions.
 - Python scalars are fused only with floating-point tensors. PyTorch promotes
   `int32 / 2` to float32, which the VM cannot express while preserving those semantics.
@@ -161,7 +87,7 @@ Known limitations:
 
 ## Performance
 
-The initial V100 benchmark used a chain of 10 elementwise operators, keeping the
+The V100 benchmark used a chain of 10 elementwise operators, keeping the
 results alive so dead-store elimination would not change the workload.
 These measurements predate reduction support.
 
@@ -179,30 +105,37 @@ graph construction and code generation dominate the execution time.
 
 ## Debugging
 
+Use `dvm_torch.Explorer()` to inspect the graphs formed during a model step or an
+operator chain. On entry, it resets the process-wide fusion counters and enables
+fusion. On exit, it submits any pending graph and saves the statistics in `ex.report`.
+
 ```python
+import torch
+import dvm_torch
+
+x = torch.ones(4, 8, device="cuda")
 with dvm_torch.Explorer() as ex:
-    run_model()
-print(ex.report["summary"])     # emit / flush / bails / graph size histogram
-print(ex.report["by_reason"])   # Group by FlushReason to find frequent flush boundaries.
+    y = (x * 2).sum(dim=1)
+
+print(ex.report["graph_sizes"])  # {2: 1}
+print(ex.report["by_reason"])    # {'Manual': 1}
 ```
 
-`dvm_torch.flush()` materializes pending work explicitly;
-`dvm_torch.disable()` restores the original dispatch table.
+Run the example again with `dvm_torch.Explorer(disable_ops="sum")` to see what
+changes when `sum` runs natively.
+
+- `graph_sizes` changes from `{2: 1}` to `{1: 1}`. By default, the multiplication
+  and sum form one two-operator graph. With `sum` excluded, the graph contains only the multiplication.
+- `by_reason` gains one `NonFusibleOp` entry for the flush requested before the
+  native `sum`. In both runs, `Manual` counts the flush requested on exit from the `with` block.
+
+The `emit` and `flush` counts in `ex.report["summary"]` give the total number of
+operators and graphs submitted, respectively. If you enable fusion manually with
+`dvm_torch.enable()`, you can call `dvm_torch.flush()` to submit the current graph
+and `dvm_torch.disable()` to restore native dispatch when finished.
 
 ## Tests
 
 ```bash
-python -m pytest tests/fusion -q
+python -m pytest tests/torch_eager_fusion -q
 ```
-
-`tests/fusion/test_escape.py` is a key regression suite: it checks that Pending
-tensors consumed by `linear`, `softmax`, `amax`, `conv2d`, and `.item()` still
-produce results matching eager execution.
-`tests/fusion/test_reductions.py` covers reduction dimensions, dtypes, dependencies
-between reductions and broadcasting, live intermediates, and native fallback paths.
-It also verifies that supported reductions actually enter the fusion graph.
-`tests/fusion/test_dse.py` checks dead-store elimination and preservation of live
-aliases and autograd saved values.
-`tests/fusion/test_sync.py` checks that synchronization points independently trigger
-materialization, compares two non-default streams against eager execution, and
-tests CUDA Graph capture / replay boundaries as well as hook installation and restoration.

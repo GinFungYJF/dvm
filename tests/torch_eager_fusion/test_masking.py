@@ -17,7 +17,7 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, eager, fused, run_eager_and_fused
 
 
 @CUDA
@@ -25,11 +25,7 @@ from conftest import CUDA, eager, fused
 def test_attention_scale_eq_mask_chain(dtype):
     scores = torch.randn(2, 3, 17, 17, device="cuda", dtype=dtype)
     keep = torch.rand(2, 1, 17, 17, device="cuda") > 0.3
-    with eager():
-        expected = (scores / 8).masked_fill(keep == 0, -10000)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = (scores / 8).masked_fill(keep == 0, -10000)
+    actual, expected = run_eager_and_fused(lambda: (scores / 8).masked_fill(keep == 0, -10000))
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert dvm_torch.stats()["graph_sizes"] == {3: 1}
 

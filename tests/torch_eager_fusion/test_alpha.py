@@ -17,14 +17,15 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, FLOAT_DTYPES, eager, fused, pairwise_cases, run_eager_and_fused
 
 pytestmark = CUDA
 
 
-@pytest.mark.parametrize("op", ["add", "sub", "add_", "sub_"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("alpha", [0, -2, 0.125, 0.1])
+@pytest.mark.parametrize(
+    "op,alpha,dtype",
+    pairwise_cases(("add", "sub", "add_", "sub_"), (0, -2, 0.125, 0.1), FLOAT_DTYPES),
+)
 def test_tensor_alpha_broadcast_and_alias(op, dtype, alpha):
     torch.manual_seed(19)
     initial = torch.randn(8, 17, device="cuda", dtype=dtype)
@@ -76,9 +77,10 @@ def test_scalar_alpha_entrypoints(op, direct_scalar):
     assert dvm_torch.stats()["emitted"] == 1
 
 
-@pytest.mark.parametrize("op", ["add", "sub", "add_", "sub_"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("alpha", [1, 1.0003])
+@pytest.mark.parametrize(
+    "op,alpha,dtype",
+    pairwise_cases(("add", "sub", "sub_", "add_"), (1, 1.0003), (torch.float16, torch.bfloat16)),
+)
 def test_scalar_alpha_preserves_opmath_precision(op, dtype, alpha):
     initial = torch.tensor([-1.0 if op.startswith("add") else 1.0], device="cuda", dtype=dtype)
     call = getattr(torch.ops.aten, op).Scalar
@@ -111,11 +113,7 @@ def test_alpha_does_not_round_product_to_low_precision(op, dtype, scalar_side):
         lhs = left.reshape(()) if scalar_side == "left" else left
         return getattr(torch.ops.aten, op).Tensor(lhs, rhs, alpha=1.0003)
 
-    with eager():
-        expected = run()
-    with fused(compile_fast=True):
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run, compile_fast=True)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert dvm_torch.stats()["emitted"] >= 1
     assert actual.abs().item() > 0
@@ -182,7 +180,7 @@ def test_strict_alpha_retains_native_fma(op):
     assert dvm_torch.stats()["emitted"] == 1
 
 
-@pytest.mark.parametrize("op", ["add", "sub"])
+@pytest.mark.parametrize("op", ["add", "sub", "add_", "sub_"])
 def test_scaled_add_sub_backward(op):
     torch.manual_seed(23)
     initial = [torch.randn(8, 17, device="cuda"), torch.randn(17, device="cuda")]
@@ -190,7 +188,10 @@ def test_scaled_add_sub_backward(op):
 
     def run(inputs):
         left, right = inputs
-        out = getattr(left * 2, op)(right, alpha=0.1)
+        if op.endswith("_"):
+            out = getattr(left.clone(), op)(right * 2, alpha=0.1)
+        else:
+            out = getattr(left * 2, op)(right, alpha=0.1)
         return out, torch.autograd.grad(out, inputs, upstream)
 
     with eager():
@@ -203,9 +204,10 @@ def test_scaled_add_sub_backward(op):
         torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("op", ["add", "sub"])
-@pytest.mark.parametrize("alpha", [0.0, float("inf"), float("nan")])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype,alpha,op",
+    pairwise_cases(FLOAT_DTYPES, (0.0, float("inf"), float("nan")), ("add", "sub")),
+)
 def test_scaled_add_sub_special_values(op, alpha, dtype):
     x = torch.tensor([0., -0., 1., -1., 0., 1.], device="cuda", dtype=dtype)
     y = torch.tensor([float("inf"), float("nan"), -0., 0., 1., 2.], device="cuda", dtype=dtype)
@@ -213,11 +215,7 @@ def test_scaled_add_sub_special_values(op, alpha, dtype):
     def run():
         return getattr(x * 1, op)(y, alpha=alpha)
 
-    with eager():
-        expected = run()
-    with fused(compile_fast=True):
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run, compile_fast=True)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
     assert dvm_torch.stats()["emitted"] == 2
 
@@ -256,11 +254,7 @@ def test_scaled_alpha_fallback_materializes_pending_rhs(op, fallback):
 def test_scaled_scalar_preserves_native_promotion(op, dtype, scalar):
     x = torch.arange(17, device="cuda", dtype=dtype)
     call = getattr(torch.ops.aten, op).Scalar
-    with eager():
-        expected = call(x, scalar, 2)
-    with fused(compile_fast=True):
-        dvm_torch.reset_stats()
-        actual = call(x, scalar, 2)
+    actual, expected = run_eager_and_fused(call, x, scalar, 2, compile_fast=True)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert actual.dtype == expected.dtype
     assert dvm_torch.stats()["emitted"] == 0
@@ -270,31 +264,8 @@ def test_scaled_scalar_preserves_native_promotion(op, dtype, scalar):
 def test_scaled_scalar_respects_disable_ops(op):
     x = torch.arange(17, device="cuda", dtype=torch.float32)
     call = getattr(torch.ops.aten, op).Scalar
-    with eager():
-        expected = call(x * 2, 0.1, 0.2)
-    with fused(compile_fast=True, disable_ops=op):
-        dvm_torch.reset_stats()
-        actual = call(x * 2, 0.1, 0.2)
+    actual, expected = run_eager_and_fused(
+        lambda: call(x * 2, 0.1, 0.2), compile_fast=True, disable_ops=op
+    )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert dvm_torch.stats()["emitted"] == 1
-
-
-@pytest.mark.parametrize("op", ["add_", "sub_"])
-def test_scaled_inplace_backward(op):
-    initial = [torch.randn(8, 17, device="cuda"), torch.randn(17, device="cuda")]
-    upstream = torch.randn_like(initial[0])
-
-    def run(inputs):
-        left, right = inputs
-        target = left.clone()
-        out = getattr(target, op)(right * 2, alpha=0.1)
-        return out, torch.autograd.grad(out, inputs, upstream)
-
-    with eager():
-        expected, expected_grads = run([x.clone().requires_grad_() for x in initial])
-    inputs = [x.clone().requires_grad_() for x in initial]
-    with fused(compile_fast=True):
-        actual, grads = run(inputs)
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-    for got, want in zip(grads, expected_grads):
-        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)

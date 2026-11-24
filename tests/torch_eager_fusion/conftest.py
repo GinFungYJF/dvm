@@ -21,6 +21,17 @@ import torch
 dvm_torch = pytest.importorskip("dvm_torch")
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+FLOAT_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
+
+
+def pairwise_cases(rows, columns, levels):
+    """Rotate the shortest axis across the other two to cover every pair."""
+    assert 0 < len(levels) <= min(len(rows), len(columns)), "pass the shortest axis last"
+    return [
+        (row, column, levels[(i + j) % len(levels)])
+        for i, row in enumerate(rows)
+        for j, column in enumerate(columns)
+    ]
 
 
 @contextlib.contextmanager
@@ -39,6 +50,16 @@ def eager():
     """Run a block with fusion off, as the reference."""
     dvm_torch.disable()
     yield
+
+
+def run_eager_and_fused(fn, *args, **fusion_options):
+    """Return the fused and eager results with fresh stats for the fused call."""
+    with eager():
+        expected = fn(*args)
+    with fused(**fusion_options):
+        dvm_torch.reset_stats()
+        actual = fn(*args)
+    return actual, expected
 
 
 def assert_same(actual, expected, tol=0.0):

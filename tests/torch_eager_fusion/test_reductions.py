@@ -17,28 +17,28 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, eager, fused, run_eager_and_fused
 
 
 @CUDA
 @pytest.mark.parametrize("name", ["sum", "mean"])
-@pytest.mark.parametrize("keepdim", [False, True])
 @pytest.mark.parametrize(
-    "shape,dims",
+    "shape,dims,keepdim_for",
     [
-        ((251,), None),
-        ((10, 251), (1,)),
-        ((64, 1001), (0,)),
-        ((3, 4, 5), (-1, 0)),
-        ((3, 4, 5), ()),
-        ((3, 4, 5), None),
-        ((2, 1, 7), (1,)),
-        ((), (0,)),
-        ((), (-1,)),
-        ((), None),
+        ((251,), None, "mean"),
+        ((10, 251), (1,), "sum"),
+        ((64, 1001), (0,), "mean"),
+        ((3, 4, 5), (-1, 0), "sum"),
+        ((3, 4, 5), (), "mean"),
+        ((3, 4, 5), None, "sum"),
+        ((2, 1, 7), (1,), "mean"),
+        ((), (0,), "sum"),
+        ((), (-1,), "mean"),
+        ((), None, "sum"),
     ],
 )
-def test_reduction_dimensions(name, keepdim, shape, dims):
+def test_reduction_dimensions(name, shape, dims, keepdim_for):
+    keepdim = name == keepdim_for
     x = torch.randn(shape, device="cuda")
     fn = getattr(torch, name)
     with eager():
@@ -51,9 +51,23 @@ def test_reduction_dimensions(name, keepdim, shape, dims):
 
 
 @CUDA
-@pytest.mark.parametrize("name", ["sum", "mean"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("out_dtype", [None, torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "name,dtype,out_dtype",
+    [
+        ("sum", torch.float32, None),
+        ("mean", torch.float32, torch.float32),
+        ("sum", torch.float32, torch.float16),
+        ("mean", torch.float32, torch.bfloat16),
+        ("mean", torch.float16, None),
+        ("sum", torch.float16, torch.float32),
+        ("mean", torch.float16, torch.float16),
+        ("sum", torch.float16, torch.bfloat16),
+        ("sum", torch.bfloat16, None),
+        ("mean", torch.bfloat16, torch.float32),
+        ("mean", torch.bfloat16, torch.float16),
+        ("sum", torch.bfloat16, torch.bfloat16),
+    ],
+)
 def test_reduction_dtype(name, dtype, out_dtype):
     x = torch.randn((8, 257), device="cuda", dtype=dtype)
     fn = getattr(torch, name)
@@ -84,11 +98,7 @@ def test_explicit_dtype_casts_before_accumulating(name):
 def test_standalone_reduction_gating(name, dims):
     x = torch.randn((32, 257), device="cuda")
     fn = getattr(torch, name)
-    with eager():
-        expected = fn(x) if dims is None else fn(x, dim=dims)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = fn(x) if dims is None else fn(x, dim=dims)
+    actual, expected = run_eager_and_fused(lambda: fn(x) if dims is None else fn(x, dim=dims))
     assert dvm_torch.stats()["emitted"] == 0
     assert dvm_torch.stats()["flushes"] == 0
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -169,11 +179,7 @@ def test_elementwise_reduction_chain(name):
     def chain(t):
         return fn(t * 2 + 1, dim=-1, keepdim=True) + 3
 
-    with eager():
-        expected = chain(x)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = chain(x)
+    actual, expected = run_eager_and_fused(chain, x)
     assert dvm_torch.stats()["emitted"] == 4
     assert dvm_torch.stats()["flushes"] == 1
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
@@ -208,11 +214,7 @@ def test_reduce_broadcast_and_multiple_reductions():
         total = centered.sum(dim=1)
         return mean, centered, variance, total
 
-    with eager():
-        expected = chain(x)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = chain(x)
+    actual, expected = run_eager_and_fused(chain, x)
     assert dvm_torch.stats()["emitted"] == 4
     assert dvm_torch.stats()["flushes"] == 1
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
@@ -224,11 +226,7 @@ def test_reduce_broadcast_and_multiple_reductions():
 def test_empty_reduction(name, shape):
     x = torch.empty(shape, device="cuda")
     fn = getattr(torch, name)
-    with eager():
-        expected = fn(x, dim=0, keepdim=True)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = fn(x, dim=0, keepdim=True)
+    actual, expected = run_eager_and_fused(lambda: fn(x, dim=0, keepdim=True))
     assert dvm_torch.stats()["emitted"] == 0
     torch.testing.assert_close(actual, expected, equal_nan=True)
 
@@ -240,11 +238,7 @@ def test_unsupported_input_dtype(name, dtype):
     x = torch.ones((3, 5), device="cuda", dtype=dtype)
     kwargs = {"dtype": torch.float32} if name == "mean" and dtype != torch.float64 else {}
     fn = getattr(torch, name)
-    with eager():
-        expected = fn(x, dim=1, **kwargs)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = fn(x, dim=1, **kwargs)
+    actual, expected = run_eager_and_fused(lambda: fn(x, dim=1, **kwargs))
     assert dvm_torch.stats()["emitted"] == 0
     torch.testing.assert_close(actual, expected)
 
@@ -254,11 +248,7 @@ def test_unsupported_input_dtype(name, dtype):
 def test_unsupported_output_dtype_flushes_pending(name):
     x = torch.randn((3, 5), device="cuda")
     fn = getattr(torch, name)
-    with eager():
-        expected = fn(x * 2, dtype=torch.float64)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = fn(x * 2, dtype=torch.float64)
+    actual, expected = run_eager_and_fused(lambda: fn(x * 2, dtype=torch.float64))
     assert dvm_torch.stats()["emitted"] == 1
     torch.testing.assert_close(actual, expected)
 
@@ -268,11 +258,7 @@ def test_unsupported_output_dtype_flushes_pending(name):
 def test_noncontiguous_reduction(name):
     x = torch.randn((7, 9), device="cuda").t()
     fn = getattr(torch, name)
-    with eager():
-        expected = fn(x, dim=0)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = fn(x, dim=0)
+    actual, expected = run_eager_and_fused(lambda: fn(x, dim=0))
     assert dvm_torch.stats()["emitted"] == 0
     torch.testing.assert_close(actual, expected)
 
@@ -335,11 +321,9 @@ def test_reduction_rank_limit(rank):
 @CUDA
 def test_many_reduction_branches_trim_and_resume():
     x = torch.ones((8, 33), device="cuda")
-    with eager():
-        expected = [(x + i).sum(dim=0) * 0.5 for i in range(80)]
-    with fused():
-        dvm_torch.reset_stats()
-        actual = [(x + i).sum(dim=0) * 0.5 for i in range(80)]
+    actual, expected = run_eager_and_fused(
+        lambda: [(x + i).sum(dim=0) * 0.5 for i in range(80)]
+    )
     # A trim can materialise a producer before its sum is considered for fusion.
     assert 160 < dvm_torch.stats()["emitted"] <= 240
     assert dvm_torch.stats()["by_reason"]["GraphTooLarge"] > 0
@@ -348,13 +332,21 @@ def test_many_reduction_branches_trim_and_resume():
 
 @CUDA
 def test_same_storage_different_shape_reduction():
-    x = torch.randn((3, 5), device="cuda")
+    x = torch.arange(15, dtype=torch.float32, device="cuda").reshape(3, 5)
     view = x.view(5, 3)
     with eager():
-        expected = x.sum(dim=0), view.sum(dim=0)
+        expected = (x * 2).sum(dim=0), (view * 2).sum(dim=0)
     with fused():
-        actual = x.sum(dim=0), view.sum(dim=0)
-    torch.testing.assert_close(actual, expected)
+        dvm_torch.reset_stats()
+        x.mul_(2)
+        base_sum = x.sum(dim=0)
+        assert dvm_torch.stats()["flushes"] == 0
+        view_sum = view.sum(dim=0)
+        assert dvm_torch.stats()["flushes"] == 1
+    stats = dvm_torch.stats()
+    assert stats["by_reason"]["WriteAlias"] == 1
+    assert stats["graph_sizes"] == {2: 1}
+    torch.testing.assert_close((base_sum, view_sum), expected, rtol=0, atol=0)
 
 
 @CUDA

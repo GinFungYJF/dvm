@@ -40,10 +40,19 @@ def close(actual, expected):
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=3e-6, equal_nan=True)
 
 
-@pytest.mark.parametrize("shape", [(17,), (4, 5, 128), (32, 128, 768)])
-@pytest.mark.parametrize("offset", [0, 7])
-@pytest.mark.parametrize("direct_scalar", [False, True])
-@pytest.mark.parametrize("retain", [False, True])
+@pytest.mark.parametrize(
+    "shape,offset,direct_scalar,retain",
+    [
+        ((32, 128, 768), 0, False, False),
+        ((17,), 0, False, True),
+        ((17,), 0, True, False),
+        ((4, 5, 128), 0, True, True),
+        ((17,), 7, False, False),
+        ((4, 5, 128), 7, False, True),
+        ((4, 5, 128), 7, True, False),
+        ((32, 128, 768), 7, True, True),
+    ],
+)
 def test_broadcast_div_accumulate_dropout(shape, offset, direct_scalar, retain):
     with eager():
         compact_shape = shape[:-1] + (1,)

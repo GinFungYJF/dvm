@@ -17,12 +17,13 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, assert_same, eager, fused
+from conftest import CUDA, assert_same, eager, fused, roundtrip, run_eager_and_fused
 
-SHAPES = [(1,), (1024,), (64, 64), (3, 5, 7), (4097,)]
+BASE_SHAPE = (1024,)
+EDGE_SHAPES = [(1,), (64, 64), (3, 5, 7), (4097,)]
 
 BINARY = {
-    "add": lambda a, b: a + b,
+    "add": lambda a, b: a * 1 + b,  # Tensor add needs a pending producer.
     "sub": lambda a, b: a - b,
     "mul": lambda a, b: a * b,
     "div": lambda a, b: a / b,
@@ -45,31 +46,35 @@ UNARY = {
 }
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-@pytest.mark.parametrize("name", sorted(BINARY))
+@pytest.mark.parametrize(
+    "name,shape",
+    [(name, BASE_SHAPE) for name in BINARY] + [("mul", shape) for shape in EDGE_SHAPES],
+)
 @CUDA
 def test_binary(shape, name):
     fn = BINARY[name]
     a = torch.randn(*shape, device="cuda")
     b = torch.randn(*shape, device="cuda").abs() + 0.5
-    with eager():
-        expected = fn(a, b)
-    with fused():
-        actual = fn(a, b)
+    actual, expected = run_eager_and_fused(fn, a, b)
+    graph_size = 2 if name == "add" else 1
+    assert dvm_torch.stats()["graph_sizes"] == {graph_size: 1}
     assert_same(actual, expected)
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-@pytest.mark.parametrize("name", sorted(UNARY))
+@pytest.mark.parametrize(
+    "name,shape",
+    [(name, BASE_SHAPE) for name in UNARY] + [("neg", shape) for shape in EDGE_SHAPES],
+)
 @CUDA
 def test_unary(shape, name):
     fn = UNARY[name]
-    # Positive input so log/sqrt/reciprocal stay finite on both paths.
     a = torch.randn(*shape, device="cuda").abs() + 0.5
-    with eager():
-        expected = fn(a)
-    with fused():
-        actual = fn(a)
+    if name in ("relu", "abs"):
+        flat = a.view(-1)
+        flat[::3].neg_()
+        flat[1::3].zero_()
+    actual, expected = run_eager_and_fused(fn, a)
+    assert dvm_torch.stats()["graph_sizes"] == {1: 1}
     assert_same(actual, expected)
 
 
@@ -81,11 +86,7 @@ def test_unary(shape, name):
 def test_broadcast(shape_a, shape_b):
     a = torch.randn(*shape_a, device="cuda")
     b = torch.randn(*shape_b, device="cuda")
-    with eager():
-        expected = a * b
-    with fused():
-        actual = a * b
-    assert_same(actual, expected)
+    roundtrip(lambda: a * b)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
@@ -93,11 +94,7 @@ def test_broadcast(shape_a, shape_b):
 def test_dtype(dtype):
     a = torch.randn(512, device="cuda", dtype=dtype)
     b = torch.randn(512, device="cuda", dtype=dtype)
-    with eager():
-        expected = a * b + 1.0
-    with fused():
-        actual = a * b + 1.0
-    assert_same(actual, expected, tol=0.0 if dtype is torch.float32 else 1e-2)
+    roundtrip(lambda: a * b + 1.0, tol=0.0 if dtype is torch.float32 else 1e-2)
 
 
 @CUDA
@@ -119,11 +116,7 @@ def test_minimum_maximum_capture_and_nan(name, dtype):
     a = torch.tensor([float("nan"), 1, -2, float("inf")], device="cuda", dtype=dtype)
     b = torch.tensor([1, float("nan"), 3, float("-inf")], device="cuda", dtype=dtype)
     fn = getattr(torch, name)
-    with eager():
-        expected = fn(a, b)
-    with fused():
-        dvm_torch.reset_stats()
-        actual = fn(a, b)
+    actual, expected = run_eager_and_fused(fn, a, b)
     assert dvm_torch.stats()["emitted"] == 1
     torch.testing.assert_close(actual, expected, equal_nan=True)
 

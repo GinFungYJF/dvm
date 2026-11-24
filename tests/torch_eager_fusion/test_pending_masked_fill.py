@@ -17,7 +17,7 @@ import pytest
 import torch
 
 import dvm_torch
-from conftest import CUDA, eager, fused
+from conftest import CUDA, eager, fused, run_eager_and_fused
 
 
 @CUDA
@@ -37,11 +37,7 @@ def test_std_gradient_preparation_and_mask_share_a_graph(dtype, retain_intermedi
         assert result is scaled and alias._version == version + 1
         return (result, alias, denominator, mask) if retain_intermediates else (result, alias)
 
-    with eager():
-        expected = run()
-    with fused():
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run)
     stats = dvm_torch.stats()
     assert stats["graph_sizes"] == {4: 1}
     assert stats["stores_skipped"] == (0 if retain_intermediates else 2)
@@ -64,11 +60,7 @@ def test_masked_write_preserves_old_consumers_and_updates_detached_alias(dtype, 
         later = produced * 5
         return produced, alias, earlier, later
 
-    with eager():
-        expected = run()
-    with fused():
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run)
     assert dvm_torch.stats()["graph_sizes"] == {4: 1}
     for got, want in zip(actual, expected):
         torch.testing.assert_close(got, want, rtol=0, atol=0)
@@ -88,11 +80,7 @@ def test_repeated_masked_writes_keep_each_predicate_value():
         assert value._version == version + 2
         return value, old_mask, new_mask
 
-    with eager():
-        expected = run()
-    with fused():
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run)
     assert dvm_torch.stats()["graph_sizes"] == {5: 1}
     for got, want in zip(actual, expected):
         torch.testing.assert_close(got, want, rtol=0, atol=0)
@@ -135,11 +123,7 @@ def test_masked_write_preserves_read_mask_view_boundary():
         target.masked_fill_(view, -3)
         return earlier, target
 
-    with eager():
-        expected = run()
-    with fused():
-        dvm_torch.reset_stats()
-        actual = run()
+    actual, expected = run_eager_and_fused(run)
     assert dvm_torch.stats()["graph_sizes"] == {2: 1, 1: 1}
     assert dvm_torch.stats()["by_reason"]["WriteAlias"] >= 1
     for got, want in zip(actual, expected):
