@@ -32,6 +32,13 @@ TORCH_DVM_FUSION="True" python train.py
 TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 ```
 
+启用融合后，GPU 后端可将只需一个向量 kernel 的 eager 图编码为一条 `Pointwise.fp32`
+VM 指令，自动选择轻量 CUDA 入口。它支持 2 到 8 个 FP32 加、减、乘、除操作，以及标量、
+按行和按末维的广播。每个线程一次处理四个相邻元素，因此主输出末维须为 4 的倍数，
+向量化读写的地址须按 16 字节对齐。指令支持多个输出、最多两个需要跨操作保存的中间值，
+最后一个操作可原地更新按相同下标访问的稠密输入。其他图沿用常规 VM 指令生成。
+要对照常规 VM，可在启动进程前设置 `DVM_GPU_POINTWISE=0`。
+
 ## 架构
 
 | 层 | 位置 | 职责 |

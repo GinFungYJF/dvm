@@ -40,6 +40,16 @@ graphs. Dead-store elimination skips writes to intermediate tensors that are no
 longer observable, while preserving live aliases and autograd saved values.
 Use `dvm_torch.enable(disable_ops="sum")` to keep selected operators native.
 
+The GPU backend can encode a single eager vector kernel as one `Pointwise.fp32`
+VM instruction. The compact CUDA entry executes two to eight FP32 adds, subtracts,
+multiplies or divides, including scalar, row and last-dimension broadcasts. It
+processes four adjacent elements at a time, so the output width must be a multiple
+of four and packed accesses must be 16-byte aligned. The instruction supports
+multiple outputs, up to two saved intermediate values and an exact dense in-place
+update at the final operation. Selection is automatic when fusion is enabled.
+Other graphs use normal VM code generation. Set `DVM_GPU_POINTWISE=0` before
+starting the process to compare against the regular VM.
+
 ## Architecture
 
 | Layer | Location | Responsibility |
