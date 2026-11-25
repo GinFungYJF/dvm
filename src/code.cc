@@ -21,6 +21,9 @@
 #include "runtime.h"
 #include "code.h"
 #include "ops.h"
+#ifdef DVM_ARCH_GPU
+#include "gpu_pointwise.h"
+#endif
 
 namespace dvm {
 namespace {
@@ -791,6 +794,14 @@ void DumpOneHot(const DumpInfo &dump_info, std::ostringstream &oss) {
   DumpVal("dup_round", op.dup_round, oss);
 }
 
+#ifdef DVM_ARCH_GPU
+void DumpPointwise(const DumpInfo &info, std::ostringstream &oss) {
+  const auto &program = *reinterpret_cast<const gpu::PointwiseProgram *>(info.insn + info.ext);
+  oss << "ops(" << unsigned(program.count) << "), width(" << program.width << "), saved(" << unsigned(program.saved)
+      << ")";
+}
+#endif
+
 void DumpCustom(const DumpInfo &dump_info, std::ostringstream &oss) {
   vCustom op;
   vCustom::Decode(dump_info.insn, op);
@@ -1039,6 +1050,9 @@ std::unordered_map<uint64_t, std::tuple<DumpFunc *, std::string, std::string>> o
   {V_ONE_HOT, {&DumpOneHot, "OneHot", "b32"}},
   {V_ONE_HOT_B16, {&DumpOneHot, "OneHot", "b16"}},
   {V_CUSTOM, {&DumpCustom, "Custom", "x"}},
+#ifdef DVM_ARCH_GPU
+  {V_GPU_POINTWISE, {&DumpPointwise, "Pointwise", "fp32"}},
+#endif
 };
 
 enum vPipe {

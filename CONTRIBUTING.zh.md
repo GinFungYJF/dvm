@@ -48,6 +48,7 @@ DEVICE_ID=0 python examples/01_add.py
 
 [build.sh](build.sh) 会将 `dvm_py` wheel 生成到 `dist/`，其中包含 `libdvm.so`、`_dvm_py.so` 和公开头文件，
 默认的 Ascend 构建还会将原生库和设备 kernel 写入 `output/`。
+`torch_dvm` wheel 仅支持 CUDA。
 使用 `-l` 可仅生成这些原生产物，使用 `-r` 可仅构建 wheel。
 [Makefile](Makefile) 目标同样保留，仍会将 Python 扩展复制到 `python/dvm/`。
 [env.sh](env.sh) 将当前代码目录加入 `PYTHONPATH`；导入路径应指向本工作区的 `python/dvm/__init__.py`。

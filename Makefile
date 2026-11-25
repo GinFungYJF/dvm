@@ -11,6 +11,7 @@ endif
 OBJ = ops.o ops_m.o ops_c.o kernel.o xkernel.o gkernel.o code.o dvm.o schedule.o pass.o utils.o vf_fusion.o system.o
 
 ifeq ($(DVM_ARCH),gpu)
+OBJ += gpu_pointwise.o
 CUDA_HOME ?= /usr/local/cuda
 CUDA_ARCH ?= sm_70
 NVCC ?= $(CUDA_HOME)/bin/nvcc
@@ -132,7 +133,7 @@ ${OBJ}: %.o: %.cc $(HEADERS)
 	$(CXX) -c $(CFLAGS) $< -o $@
 
 ifeq ($(DVM_ARCH),gpu)
-vm.o: vm_gpu.cu isa.h vm_gpu.h $(GPU_RUNOP_CHECK)
+vm.o: vm_gpu.cu isa.h vm_gpu.h gpu_pointwise.h gpu_pointwise.cuh $(GPU_RUNOP_CHECK)
 	python3 scripts/check_gpu_dispatch.py src/vm_gpu.h src/vm_gpu.cu
 	$(NVCC) -c -O2 --std=c++17 -DDVM_ARCH_GPU -arch=$(CUDA_ARCH) --jump-table-density=60 -Xcompiler -fPIC -I./include -I./src $< -o $@
 else

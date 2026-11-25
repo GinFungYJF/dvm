@@ -23,7 +23,7 @@ PYTHON=${PYTHON:-python3}
 usage()
 {
   echo "Usage:"
-  echo "bash build.sh [-d] [-a] [-j[n]] [-b npu|gpu] [-l] [-r]"
+  echo "bash build.sh [-d] [-a] [-j[n]] [-b npu|gpu] [-l] [-r] [-t]"
   echo ""
   echo "Options:"
   echo "    -d Debug mode"
@@ -32,17 +32,19 @@ usage()
   echo "    -b    Target backend: npu (default) or gpu"
   echo "    -l    Build only the C++ libraries into output/, no wheels"
   echo "    -r    Build only the dvm_py wheel"
+  echo "    -t    Build only the torch_dvm wheel, including its CUDA backend"
   echo ""
-  echo "The default build produces a wheel in dist/ and, on NPU, native libraries in output/."
+  echo "The default GPU build produces both wheels in dist/."
+  echo "The default NPU build produces the dvm_py wheel and native libraries in output/."
 }
 
 THREAD_NUM=${DVM_BUILD_JOBS:-8}
-ARCH="${DVM_ARCH:-npu}"
-BUILD_WHEELS=1
+ARCH=""
 BUILD_LIBS_ONLY=0
-WHEEL_ONLY=0
+BUILD_RUNTIME=0
+BUILD_TORCH=0
 STAGE_NATIVE=0
-while getopts 'hdaj:b:lr' opt
+while getopts 'hdaj:b:lrt' opt
 do
   case "${opt}" in
     h)
@@ -65,7 +67,10 @@ do
       BUILD_LIBS_ONLY=1
       ;;
     r)
-      WHEEL_ONLY=1
+      BUILD_RUNTIME=1
+      ;;
+    t)
+      BUILD_TORCH=1
       ;;
     *)
       echo "Unknown option ${opt}!"
@@ -74,17 +79,27 @@ do
   esac
 done
 
+if [[ ${BUILD_TORCH} -eq 1 ]]; then
+  ARCH=${ARCH:-gpu}
+else
+  ARCH=${ARCH:-${DVM_ARCH:-npu}}
+fi
 if [[ "${ARCH}" != "npu" && "${ARCH}" != "gpu" ]]; then
   echo "[ERROR] backend must be npu or gpu, got '${ARCH}'"
   usage
   exit 1
 fi
+if [[ ${BUILD_TORCH} -eq 1 && "${ARCH}" != "gpu" ]]; then
+  echo "[ERROR] torch_dvm requires the GPU backend" >&2
+  exit 1
+fi
 
-if [[ ${WHEEL_ONLY} -eq 0 ]]; then
-  if [[ ${BUILD_LIBS_ONLY} -eq 1 ]]; then
-    BUILD_WHEELS=0
-  elif [[ "${ARCH}" == "npu" ]]; then
+if [[ ${BUILD_LIBS_ONLY} -eq 0 && ${BUILD_RUNTIME} -eq 0 && ${BUILD_TORCH} -eq 0 ]]; then
+  BUILD_RUNTIME=1
+  if [[ "${ARCH}" == "npu" ]]; then
     STAGE_NATIVE=1
+  else
+    BUILD_TORCH=1
   fi
 fi
 
@@ -123,33 +138,41 @@ build_libraries()
 }
 
 build_wheels()
-{
+(
   local version
   version=$(cat "${BASEPATH}/version.txt")
   echo "---------------- wheel build start (backend=${ARCH}, version=${version}) ----------------"
-  mkdir -p "${DIST_DIR}"
+  mkdir -p "${DIST_DIR}" || return 1
 
-  # setup.py drives `make` itself, so the tree must be clean of stale objects
-  # built for the other backend.
-  make clean
-
+  local stage
+  stage=$(mktemp -d) || return 1
+  trap 'rm -rf "${stage}"' EXIT
   local pip_common=(--no-build-isolation --no-deps --quiet)
 
-  echo "[wheel] dvm_py"
-  DVM_BUILD_INPLACE="${STAGE_NATIVE}" "${PYTHON}" -m pip wheel "${BASEPATH}/packages/dvm_py" \
-    "${pip_common[@]}" --wheel-dir "${DIST_DIR}" || {
-    echo "[ERROR] dvm_py wheel build failed"; exit 1; }
+  if [[ ${BUILD_RUNTIME} -eq 1 ]]; then
+    make clean || return 1
+    echo "[wheel] dvm_py"
+    DVM_BUILD_INPLACE="${STAGE_NATIVE}" "${PYTHON}" -m pip wheel "${BASEPATH}/packages/dvm_py" \
+      "${pip_common[@]}" --wheel-dir "${stage}" || return 1
+  fi
 
+  if [[ ${BUILD_TORCH} -eq 1 ]]; then
+    echo "[wheel] torch_dvm"
+    "${PYTHON}" -m pip wheel "${BASEPATH}/packages/torch_dvm" \
+      "${pip_common[@]}" --wheel-dir "${stage}" || return 1
+  fi
+
+  cp "${stage}"/*.whl "${DIST_DIR}/" || return 1
   if [[ ${STAGE_NATIVE} -eq 1 ]]; then
     stage_libraries || return 1
   fi
 
   echo "---------------- wheel build end ----------------"
-  ls -lh "${DIST_DIR}"/dvm_py-*.whl
-}
+  (cd "${stage}" && ls -lh -- *.whl)
+)
 
-if [[ ${BUILD_WHEELS} -eq 0 ]]; then
-  build_libraries
-else
+if [[ ${BUILD_RUNTIME} -eq 1 || ${BUILD_TORCH} -eq 1 ]]; then
   build_wheels
+else
+  build_libraries
 fi

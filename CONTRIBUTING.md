@@ -59,6 +59,7 @@ DEVICE_ID=0 python examples/01_add.py
 
 [build.sh](build.sh) builds the `dvm_py` wheel into `dist/`, bundling `libdvm.so`, `_dvm_py.so` and the public
 headers. The default Ascend build also stages the native libraries and device kernels in `output/`.
+The `torch_dvm` wheel is available on CUDA.
 Pass `-l` for just these artifacts or `-r` for just the wheel. The [Makefile](Makefile) targets remain available and still copy the Python extension into `python/dvm/`.
 [env.sh](env.sh) adds this checkout to `PYTHONPATH`; the printed import path should point to `python/dvm/__init__.py`
 in this checkout. Rebuild after native-code changes. Select an available device with `DEVICE_ID` when running examples
