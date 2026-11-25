@@ -1,0 +1,12 @@
+DVM_1 {
+  global:
+    # Every dvm:: symbol, including the private ones the Python binding links
+    # against. Visibility itself is decided by DVM_API in the headers; this
+    # script only filters what already reached the dynamic symbol table, which
+    # is what keeps the std:: template instances out.
+    extern "C++" {
+      dvm::*;
+      *dvm::*;
+    };
+  local: *;
+};

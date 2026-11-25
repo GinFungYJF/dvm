@@ -83,13 +83,15 @@ python -m pip install -r requirements.txt
 
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
-source env.sh
-make -j8
+bash build.sh -b npu -j8
+python -m pip install dist/dvm_rt-*.whl
 python -c "import dvm; print(dvm.__file__)"
 ```
 
-构建会生成 `libdvm.a` 和 `_dvm_py.so`，并将 Python 扩展复制到 `python/dvm/`。
-输出的导入路径应指向当前代码目录。如需使用 Clang 编译 Host 代码：
+Ascend 默认构建会将 `dvm_rt` wheel 写入 `dist/`，将原生库、设备 kernel 二进制和静态库校验和写入
+`output/`。wheel 包含 `libdvm.so`、Python 扩展和公开头文件。使用 `-r` 可仅构建运行时 wheel，
+使用 `-l` 可仅生成原生产物。`make` 目标也会将 Python 扩展复制到 `python/dvm/`。
+如需使用 Clang 编译 Host 代码：
 
 ```bash
 CXX=clang++ make -j8

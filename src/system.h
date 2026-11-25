@@ -55,7 +55,7 @@ namespace dvm {
   do {                                      \
     if (cond) dvm::DvmException(error_str); \
   } while (0)
-void DvmException(const char *error_str);
+DVM_API void DvmException(const char *error_str);
 
 #define ERROR_CHECK(func)  \
   do {                     \
@@ -133,8 +133,8 @@ enum SocType {
   kSocUnknow,
 };
 
-const char *AiCoreArchName(AiCoreArch arch);
-const char *SocTypeName(SocType type);
+DVM_API const char *AiCoreArchName(AiCoreArch arch);
+DVM_API const char *SocTypeName(SocType type);
 
 enum CubeStoreType {
   kCubeStoreGM = 0,
@@ -222,15 +222,15 @@ class System : public Config {
   const uint64_t *g_access_func_offset_;
   const uint64_t *g_visit_func_offset_;
 
-  void RegCustom(const std::string &nspace, const std::string &so_path, const std::string &bin_path);
-  void RegCustom(const std::string &nspace, const std::string &bin_path);
+  DVM_API void RegCustom(const std::string &nspace, const std::string &so_path, const std::string &bin_path);
+  DVM_API void RegCustom(const std::string &nspace, const std::string &bin_path);
   uint64_t GetCustomFunc(const std::string &full_name) const;
   std::string GetCustomFuncName(uint64_t func_id) const;
-  NDObject *CreateCustom(const std::string &op_name, const std::vector<NDObject *> &inputs,
+  DVM_API NDObject *CreateCustom(const std::string &op_name, const std::vector<NDObject *> &inputs,
                          const std::vector<ScalarRef> &attrs) const;
 
  private:
-  void DoInit();
+  DVM_API void DoInit();
   void GetSocConfig();
 
   uint64_t local_mem_size_;
@@ -269,7 +269,7 @@ class System : public Config {
 #endif
 };
 
-extern System g_system;
+extern DVM_API System g_system;
 
 inline constexpr uint64_t SIMD_BLOCK_SIZE = 32;
 inline constexpr uint64_t SIMD_REPEAT_SIZE = 256;
@@ -278,7 +278,7 @@ inline constexpr uint32_t MATMUL_ALIGN_MAX = 1024;
 
 inline constexpr uint32_t SIMD_DTYPE_END = DataType::kInt64;
 
-extern const uint64_t ITEM_SIZE[DataType::kDataTypeEnd];
+extern DVM_API const uint64_t ITEM_SIZE[DataType::kDataTypeEnd];
 extern const char *DTYPE_NAMES[DataType::kDataTypeEnd];
 extern const uint64_t ITEM_SIMD_WIDTH_MAX[DataType::kDataTypeEnd];
 }  // namespace dvm
