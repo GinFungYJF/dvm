@@ -1,6 +1,12 @@
 VPATH = ./src:./include
 
 DVM_ARCH ?= npu
+PYTHON ?= python3
+PYBIND11_INCLUDES ?= $(shell $(PYTHON) -m pybind11 --includes 2>/dev/null)
+.DEFAULT_GOAL := all
+ifneq ($(filter $(DVM_ARCH),npu gpu),$(DVM_ARCH))
+$(error DVM_ARCH must be npu or gpu)
+endif
 
 OBJ = ops.o ops_m.o ops_c.o kernel.o xkernel.o gkernel.o code.o dvm.o schedule.o pass.o utils.o vf_fusion.o system.o
 
@@ -8,10 +14,13 @@ ifeq ($(DVM_ARCH),gpu)
 CUDA_HOME ?= /usr/local/cuda
 CUDA_ARCH ?= sm_70
 NVCC ?= $(CUDA_HOME)/bin/nvcc
-CFLAGS = --std=c++17 -Werror -Wall -I./include -I$(CUDA_HOME)/include ${DVM_CUSTOM_FLAGS} -fPIC -fvisibility=hidden -DDVM_ARCH_GPU
+CUDA_TARGET_DIR := $(CUDA_HOME)/targets/$(shell uname -m)-linux
+CUDA_INCLUDE_DIR ?= $(if $(wildcard $(CUDA_HOME)/include/cuda_runtime.h),$(CUDA_HOME)/include,$(CUDA_TARGET_DIR)/include)
+CUDA_LIB_DIR ?= $(if $(wildcard $(CUDA_HOME)/lib64/libcudart.so),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
+CFLAGS = --std=c++17 -Werror -Wall -I./include -I$(CUDA_INCLUDE_DIR) ${DVM_CUSTOM_FLAGS} -fPIC -fvisibility=hidden -DDVM_ARCH_GPU
 CFLAGS += -fstack-protector-all -Wno-array-bounds
 LDFLAGS += -Wl,-z,relro,-z,now,-z,noexecstack
-LD_FLAGS = -L$(CUDA_HOME)/lib64 -lcudart
+LD_FLAGS = -L$(CUDA_LIB_DIR) -lcudart
 else
 OBJ += msprof.o comm.o
 CFLAGS = --std=c++17 -Werror -Wall -I./include -I${ASCEND_HOME_PATH}/include -I${ASCEND_HOME_PATH}/pkg_inc ${DVM_CUSTOM_FLAGS} -fPIC -fvisibility=hidden
@@ -26,7 +35,13 @@ CCE_FLGAS_C220 = --std=c++17 -Wno-int-to-pointer-cast\
                  -mllvm -cce-aicore-jump-expand=true \
                  -mllvm -cce-aicore-mask-opt=false
 
-CCE_FLGAS_C310 = --std=c++17 -Wno-int-to-pointer-cast\
+# C310 AscendC headers use C++17 type traits. ccec can pick an older system
+# libstdc++, so take the C++-only include paths from the host compiler.
+cxx_include_dirs = $(shell LC_ALL=C $(CXX) -E -x c++ -v $(1) /dev/null 2>&1 | \
+                          sed -n '/search starts here:/,/End of search list/s/^ //p')
+CXX_STDLIB_DIRS := $(filter-out $(call cxx_include_dirs,-nostdinc++),$(call cxx_include_dirs))
+CCE_FLGAS_C310 = --std=c++17 $(foreach dir,$(CXX_STDLIB_DIRS),-stdlib++-isystem $(dir)) \
+                 -Wno-int-to-pointer-cast \
                  --cce-aicore-only \
                  --cce-auto-sync=off \
                  --cce-simd-vf-fusion=true \
@@ -48,6 +63,7 @@ CFLAGS += -DVK_SIM_MODEL
 else
 LD_FLAGS = -L${ASCEND_HOME_PATH}/lib64 -lascendcl
 endif
+LD_FLAGS += -lprofapi -ldl
 endif
 
 CXX_VERSION := $(shell $(CXX) --version 2>/dev/null | head -n 1)
@@ -65,6 +81,7 @@ endif
 
 ifneq ($(asan),)
 CFLAGS += -fsanitize=address -fsanitize-recover=address -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=address
 endif
 
 XXD_FOUND := $(shell which xxd 2>/dev/null)
@@ -79,19 +96,38 @@ ifeq ($(DVM_ARCH),gpu)
 HEADERS += vm_gpu.h
 endif
 
-all: _dvm_py.so
+.PHONY: all libs shared clean help FORCE check-shared install
+all: libs _dvm_py.so
+libs: libdvm.a libdvm.so
+shared: libdvm.so
+check-shared: all
+	$(PYTHON) scripts/check_shared.py
+
+# Record build settings so changes to the toolchain or flags invalidate stale objects.
+.dvm-build-config: FORCE
+	@$(PYTHON) scripts/build_config.py $@ '$(DVM_ARCH)' '$(CXX)' '$(CFLAGS)' '$(NVCC)' '$(CUDA_ARCH)' '$(PRE_ASCEND)' '$(PYBIND11_INCLUDES)' '$(LDFLAGS)' '$(LD_FLAGS)'
+
+$(OBJ) vm.o pybind_api.o dry_run.o: .dvm-build-config
 
 _dvm_py.so: pybind_api.o dry_run.o libdvm.a
 	$(CXX) -shared $(LDFLAGS) $^ $(LD_FLAGS) -o $@
-	cp $@ ./python/dvm
+	cp $@ ./python/dvm/
 
 libdvm.a: $(OBJ) vm.o
-	ar crv $@ $^
+	rm -f $@
+	$(AR) crs $@ $^
+
+libdvm.so.1: libdvm.a scripts/dvm.map
+	$(CXX) -shared $(LDFLAGS) -Wl,-z,defs -Wl,-soname,libdvm.so.1 -Wl,--version-script=scripts/dvm.map -Wl,--whole-archive libdvm.a -Wl,--no-whole-archive $(LD_FLAGS) -o $@
+	cp $@ ./python/dvm/
+
+libdvm.so: libdvm.so.1
+	ln -sf libdvm.so.1 $@
 
 pybind_api.o: pybind_api.cc pybind_api.h dvm_py.h $(HEADERS)
 	$(CXX) -c $(CFLAGS) $(PYBIND11_INCLUDES) $< -o $@
 
-dry_run.o: dry_run.cc isa.h vm_aiv.cce vm_aic.cce
+dry_run.o: dry_run.cc isa.h vm_aiv.cce vm_aic.cce $(HEADERS)
 	$(CXX) -c $(CFLAGS) $< -o $@
 
 ${OBJ}: %.o: %.cc $(HEADERS)
@@ -145,7 +181,14 @@ prebuild: g_vkernel_c220_bin g_vkernel_c310_bin
 endif
 
 clean:
-	rm -f *.o *.so *.a *bin vm.cc
+	rm -f *.o *.so libdvm.so.1 *.a *bin vm.cc
 
 help:
 	@echo "Usage: make [dbg=1] [asan=1] [PRE_ASCEND=1]"
+
+PREFIX ?= /usr/local
+install: libs
+	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include
+	install -m 644 libdvm.a libdvm.so.1 $(DESTDIR)$(PREFIX)/lib/
+	ln -sf libdvm.so.1 $(DESTDIR)$(PREFIX)/lib/libdvm.so
+	install -m 644 include/dvm.h $(DESTDIR)$(PREFIX)/include/

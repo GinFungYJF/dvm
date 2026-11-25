@@ -52,12 +52,14 @@ below with your installation path:
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
 source env.sh
-make -j8
+bash build.sh -b npu -j8
 python -c "import dvm; print(dvm.__file__)"
 DEVICE_ID=0 python examples/01_add.py
 ```
 
-The [Makefile](Makefile) builds `libdvm.a` and `_dvm_py.so`, and copies the Python extension into `python/dvm/`.
+[build.sh](build.sh) builds the `dvm_py` wheel into `dist/`, bundling `libdvm.so`, `_dvm_py.so` and the public
+headers. The default Ascend build also stages the native libraries and device kernels in `output/`.
+Pass `-l` for just these artifacts or `-r` for just the wheel. The [Makefile](Makefile) targets remain available and still copy the Python extension into `python/dvm/`.
 [env.sh](env.sh) adds this checkout to `PYTHONPATH`; the printed import path should point to `python/dvm/__init__.py`
 in this checkout. Rebuild after native-code changes. Select an available device with `DEVICE_ID` when running examples
 or tests. To use Clang for host compilation, run `CXX=clang++ make -j8`.

@@ -65,7 +65,7 @@ DVM 支持 Huawei Ascend NPU 硬件，并覆盖 c220、c310 系列芯片架构�
 | 硬件 | Huawei Ascend A2、A3 或 A5 |
 | 运行时 | CANN 8.5 或更高版本 |
 | C++ 编译器 | 支持 C++17；已验证 GCC 7.3.0 和 Clang 18.1 |
-| Python | Python 3.7 或更高版本；安装 [requirements.txt](requirements.txt) 中的依赖，包括 NumPy 和 pybind11 |
+| Python | Python 3.7 或更高版本。详见 [wheel 构建依赖](packages/dvm_py/pyproject.toml)和[开发依赖](requirements.txt)。 |
 
 <a id="编译执行"></a>
 
@@ -76,26 +76,27 @@ DVM 支持 Huawei Ascend NPU 硬件，并覆盖 c220、c310 系列芯片架构�
 ```bash
 git clone https://github.com/mindspore-ai/dvm.git
 cd dvm
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt 'setuptools>=64' wheel 'pybind11>=2.10'
 ```
 
 将以下 CANN 路径替换为实际安装路径，然后在仓库根目录配置环境并构建 DVM：
 
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
-source env.sh
-make -j8
+bash build.sh -b npu -j8
+python -m pip install dist/dvm_py-*.whl
 python -c "import dvm; print(dvm.__file__)"
 ```
 
-构建会生成 `libdvm.a` 和 `_dvm_py.so`，并将 Python 扩展复制到 `python/dvm/`。
-输出的导入路径应指向当前代码目录。如需使用 Clang 编译 Host 代码：
+Ascend 默认构建会将 `dvm_py` wheel 写入 `dist/`。wheel 包含 `libdvm.so`、Python 扩展和公开头文件。
+
+使用 Clang 编译 Host 代码时，执行以下命令。
 
 ```bash
 CXX=clang++ make -j8
 ```
 
-开发环境、CUDA 后端构建步骤和测试说明见[贡献指南](CONTRIBUTING.zh.md)。
+各后端的环境配置和测试步骤见[贡献指南](CONTRIBUTING.zh.md)。
 
 ---
 
