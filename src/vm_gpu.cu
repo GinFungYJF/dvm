@@ -24,6 +24,7 @@
 #define _VM_KERNEL_ 1
 #include "isa.h"
 #include "vm_gpu.h"
+#include "gpu_pointwise.cuh"
 
 namespace dvm::gpu {
 namespace {
@@ -938,6 +939,15 @@ __device__ __forceinline__ void StoreAtomicOp(VmCtx &ctx, uint64_t *pc, uint64_t
   });
 }
 
+// Keep the packed arithmetic temporaries out of the general interpreter's live register set.
+__device__ __noinline__ void PointwiseOp(const uint64_t *pc, uint64_t head, uint32_t tile_idx) {
+  const auto table_offset = (head >> V_HEAD_EXT_OFFSET) & V_HEAD_EXT_MASK;
+  const auto &program = *reinterpret_cast<const PointwiseProgram *>(pc + table_offset);
+  for (uint32_t lane = threadIdx.x; lane < kPointwiseThreads; lane += blockDim.x) {
+    RunPointwise(program, tile_idx * kPointwiseThreads + lane);
+  }
+}
+
 __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, uint32_t tile_idx, bool is_begin,
                                       bool is_end, bool is_last) {
   uint32_t id = head >> V_HEAD_ID_OFFSET;
@@ -1541,6 +1551,9 @@ __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, u
     case F_ATOMICCUM:
       AtomicCumOp(ctx, pc, head, tile_idx, is_begin);
       break;
+    case F_POINTWISE:
+      PointwiseOp(pc, head, tile_idx);
+      break;
     default:
       TrapUnsupported(id, head, pc);
       break;
@@ -1548,6 +1561,11 @@ __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, u
 }
 
 }  // namespace
+
+__global__ void dvm_vm_gpu_packed_code(__grid_constant__ const VmParam param) {
+  const auto &program = *reinterpret_cast<const PointwiseProgram *>(param.code + PointwiseCode::kProgram);
+  RunPointwise(program, blockIdx.x * kPointwiseThreads + threadIdx.x);
+}
 
 __global__ void dvm_vm_gpu(__grid_constant__ const VmParam param) {
   extern __shared__ uint8_t smem[];
@@ -1635,8 +1653,12 @@ static GpuSystem g_gpu;
 
 int LaunchVM(const VmParam &param, uint32_t block_dim, uint32_t threads, uint32_t shared_bytes, void *stream) {
   cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
-  dvm_vm_gpu<<<block_dim, threads, shared_bytes, cuda_stream>>>(param);
-  return 0;
+  if (PointwiseCode::Matches(param, threads, shared_bytes)) {
+    dvm_vm_gpu_packed_code<<<block_dim, threads, 0, cuda_stream>>>(param);
+  } else {
+    dvm_vm_gpu<<<block_dim, threads, shared_bytes, cuda_stream>>>(param);
+  }
+  return static_cast<int>(cudaPeekAtLastError());
 }
 
 uint64_t SelectBlockThread(uint64_t op_num, uint64_t tile_num, uint64_t tile_size, uint32_t shared_bytes) {

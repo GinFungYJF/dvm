@@ -20,6 +20,9 @@
 #include "xkernel.h"
 #include "comm.h"
 #include "msprof.h"
+#ifdef DVM_ARCH_GPU
+#include "gpu_pointwise.h"
+#endif
 
 namespace dvm {
 namespace {
@@ -2300,6 +2303,18 @@ void _SplitKernel::BuildKernel(EagerVector *kernel, const EagerArea *area, WsAll
   ctx_->gen_.clear();
 }
 
+uint64_t _SplitKernel::CodeGenVector(EagerVector *kernel, EagerVector **pv_kernels, int pv_num, size_t reloc_size) {
+#ifdef DVM_ARCH_GPU
+  // A single scheduled region can use the logical DAG order for alias and last-use checks.
+  if (ktype_ == KernelType::kEager && flags_ == KernelFlag::kUnifyWS && kernel_used_ == 1 && pv_num == 0 &&
+      reloc_size == 0 && g_system.code_launch_ == System::CodeLaunchGPU && gpu::TryEmitPointwise(objects_, kernel->code_)) {
+    kernel->tile_num_ = kernel->code_.block_dim_;
+    return 0;
+  }
+#endif
+  return kernel->CodeGenV(pv_kernels, pv_num);
+}
+
 void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAllocator *ws_alloc) {
   for (auto reloc = relocs; reloc < relocs + reloc_size; ++reloc) {
     static_cast<NDAccess *>(reloc->io)->addr_.gm = reloc->addr;
@@ -2375,7 +2390,7 @@ void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAlloc
           BuildKernel(k, a, ws_alloc);
         }
       }
-      if (uint64_t ws_size = kernel->EagerVector::CodeGenV(pv_kernels, pv_num); ws_size > 0) {
+      if (uint64_t ws_size = CodeGenVector(kernel, pv_kernels, pv_num, reloc_size); ws_size > 0) {
         void *ws_mem;
         if (auto mem = ctx_->Alloc(ws_size)) {
           ws_mem = mem->addr;
@@ -2480,7 +2495,9 @@ std::string &_SplitKernel::DisAssemble() {
 int _SplitKernel::Launch(void *stream) {
   if (likely(!g_system.enable_profile_)) {
     for (int i = kernel_begin_; i < kernel_used_; ++i) {
-      kernels_[i]->code_.Launch(extern_code_, stream);
+      if (int ret = kernels_[i]->code_.Launch(extern_code_, stream); unlikely(ret != 0)) {
+        return ret;
+      }
     }
     return 0;
   }
@@ -2533,7 +2550,9 @@ int _SplitKernel::Launch(void *stream) {
     info.op_fullname = info.op_name;
     msprof_helper.InitReportNode();
     msprof_helper.Update(target);
-    vector_kernel->code_.Launch(extern_code_, stream);
+    if (int ret = vector_kernel->code_.Launch(extern_code_, stream); unlikely(ret != 0)) {
+      return ret;
+    }
     msprof_helper.ReportTask();
   }
   return 0;

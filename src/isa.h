@@ -224,6 +224,7 @@ enum vSimdInsnID {
 
   V_CUSTOM,
   V_COPY_CUBE_TILE,  // [c310]
+  V_GPU_POINTWISE,   // [gpu]
   V_NONE,
 };
 

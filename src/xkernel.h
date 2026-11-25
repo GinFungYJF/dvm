@@ -367,6 +367,7 @@ class _SplitKernel : public VKernel {
   void Split(NDObject *root);
   NDObject *Exchange(NDObject *input, int to_aid);
   void BuildKernel(EagerVector *kernel, const EagerArea *area, WsAllocator *alloc);
+  uint64_t CodeGenVector(EagerVector *kernel, EagerVector **pv_kernels, int pv_num, size_t reloc_size);
   void RelocBinds();
 
   std::vector<std::pair<EagerArea *, EagerArea *>> areas_;

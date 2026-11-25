@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "torch>=2.13"]
+build-backend = "setuptools.build_meta"
+
+# dvm-torch links against dvm-rt of the same version; the pair is released together.
+[tool.dvm]
+requires-dvm-rt = true
+cuda-minimum = "12.0"
+
+[tool.pytest.ini_options]
+testpaths = ["../../tests/torch_eager_fusion"]
