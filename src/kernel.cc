@@ -1712,7 +1712,7 @@ RETRY:
           auto input_root = GetPdHead(input_head);
           if (root->index_ > input_root->index_) {
             SetPdHead(input_root, root);
-          } else {
+          } else if (root->index_ < input_root->index_) {
             SetPdHead(root, input_root);
           }
         }

@@ -291,6 +291,22 @@ def test_reshape_broker_prop(shape_a, shape_b, shape_c, red_dims):
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+def test_reshape_broker_multi_output():
+    t = Tester()
+    a = np.arange(1, 33, dtype=np.float32).reshape(2, 1, 16)
+    x = t.reshape(t.broadcast(t.load(a), [2, 3, 16]), [6, 16])
+    y = t.add(x, 1.0)
+    s = t.sum(x, [1], True)
+    z = t.sub(x, 1.0)
+    r = t.add(x, y)
+    expect = np.broadcast_to(a, (2, 3, 16)).reshape(6, 16)
+    t.store_expect(r, expect + expect + 1.0)
+    t.store_expect(z, expect - 1.0)
+    t.store_expect(s, np.sum(expect, axis=1, keepdims=True))
+    assert (t.run_check())
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 @pytest.mark.mix
 def test_matmul_post_fusion_forward():
     t = Tester("mix")
