@@ -147,7 +147,8 @@ class DVM_API BFloat16 {
 };
 
 struct DVM_API IntArrayRef {
-  IntArrayRef() {}
+  IntArrayRef() : data(nullptr), size(0) {}
+  IntArrayRef(const int64_t *ptr, size_t count) : data(ptr), size(count) {}
   explicit IntArrayRef(const std::vector<int64_t> &other) : data(other.data()), size(other.size()) {}
   IntArrayRef &operator=(const std::vector<int64_t> &other) {
     data = other.data();

@@ -1,0 +1,9 @@
+DVM_1 {
+  global:
+    # Version the DVM symbols with default visibility.
+    extern "C++" {
+      dvm::*;
+      *dvm::*;
+    };
+  local: *;
+};

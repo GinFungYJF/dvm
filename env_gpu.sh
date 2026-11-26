@@ -19,40 +19,42 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-export DVM_ARCH="gpu"
-
 # ----------------------------
 # GPU (CUDA) toolchain
 # ----------------------------
-if [ -z "${CUDA_HOME}" ]; then
-  if command -v nvcc >/dev/null 2>&1; then
-    CUDA_HOME=$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")
-  elif [ -d "/usr/local/cuda" ]; then
-    CUDA_HOME="/usr/local/cuda"
-  fi
+dvm_cuda_home=${CUDA_HOME:-/usr/local/cuda}
+# NVCC can be a wrapper outside the toolkit, so prefer nvcc on PATH for discovery.
+if [[ -z "${CUDA_HOME:-}" ]] && dvm_nvcc=$(command -v nvcc || command -v "${NVCC:-}"); then
+  dvm_cuda_home=$(dirname "$(dirname "$(readlink -f "${dvm_nvcc}")")")
 fi
-export CUDA_HOME
-
-if [ -z "${CUDA_HOME}" ] || [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
-  echo "ERROR: CUDA toolkit not found. Please set CUDA_HOME or add nvcc to PATH."
+if [[ ! -d "${dvm_cuda_home}" ]]; then
+  echo "ERROR: CUDA toolkit not found. Please set CUDA_HOME or add nvcc to PATH." >&2
   return 1 2>/dev/null || exit 1
 fi
+PYTHON_BIN=${PYTHON:-$(command -v python3 || command -v python)}
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR: Python is required to check the CUDA toolkit. Please set PYTHON or add python3 to PATH." >&2
+  return 1 2>/dev/null || exit 1
+fi
+if ! PATH="${dvm_cuda_home}/bin:${PATH}" "${PYTHON_BIN}" "${CUR_SCRIPT_PATH}/scripts/check_cuda.py" \
+    "${NVCC:-${dvm_cuda_home}/bin/nvcc}"; then
+  return 1 2>/dev/null || exit 1
+fi
+export CUDA_HOME="${dvm_cuda_home}"
+export DVM_ARCH="gpu"
 export PATH="${CUDA_HOME}/bin:${PATH}"
 
 # ----------------------------
 # Set Pybind11 includes if not already set
 # ----------------------------
-if [[ -z "${PYBIND11_INCLUDES}" ]]; then
-  PYTHON_BIN=$(command -v python3 || command -v python)
-  if [ -n "${PYTHON_BIN}" ]; then
-    export PYBIND11_INCLUDES=$(${PYTHON_BIN} -m pybind11 --includes 2>/dev/null)
-  fi
+if [[ -z "${PYBIND11_INCLUDES:-}" ]]; then
+  export PYBIND11_INCLUDES=$("${PYTHON_BIN}" -m pybind11 --includes 2>/dev/null)
   if [ -z "${PYBIND11_INCLUDES}" ]; then
     echo "WARNING: Failed to get pybind11 includes. Please ensure pybind11 is installed."
   fi
 fi
 
-export PYTHONPATH="${CUR_SCRIPT_PATH}:${CUR_SCRIPT_PATH}/python:${PYTHONPATH}"
+export PYTHONPATH="${CUR_SCRIPT_PATH}:${CUR_SCRIPT_PATH}/python:${PYTHONPATH:-}"
 
 # ----------------------------
 # Optional: Print environment summary

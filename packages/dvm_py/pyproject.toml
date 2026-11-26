@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "pybind11>=2.10"]
+build-backend = "setuptools.build_meta"
+
+# External toolchain requirements (not pip-installable Python dependencies).
+# CUDA 12 is required by the current GPU VM (ptxas --jump-table-density).
+[tool.dvm]
+cuda-minimum = "12.0"
+cann-recommended = "8.5"

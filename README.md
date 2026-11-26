@@ -73,7 +73,7 @@ The following requirements and build steps apply to the Ascend backend:
 | Hardware | Huawei Ascend A2, A3, or A5 |
 | Runtime | CANN 8.5 or later |
 | C++ compiler | C++17 support; tested with GCC 7.3.0 and Clang 18.1 |
-| Python | Python 3.7 or later, with dependencies from [requirements.txt](requirements.txt), including NumPy and pybind11 |
+| Python | Python 3.7 or later. See the [wheel build requirements](packages/dvm_py/pyproject.toml) and [development dependencies](requirements.txt). |
 
 <a id="编译执行"></a>
 
@@ -84,26 +84,27 @@ In an activated Python environment, clone the repository and install its Python 
 ```bash
 git clone https://github.com/mindspore-ai/dvm.git
 cd dvm
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt 'setuptools>=64' wheel 'pybind11>=2.10'
 ```
 
 Replace the CANN path below with your installation path, then configure and build DVM from the repository root:
 
 ```bash
 source /path/to/ascend-toolkit/set_env.sh
-source env.sh
-make -j8
+bash build.sh -b npu -j8
+python -m pip install dist/dvm_py-*.whl
 python -c "import dvm; print(dvm.__file__)"
 ```
 
-The build produces `libdvm.a` and `_dvm_py.so`, and copies the Python extension into `python/dvm/`.
-The printed import path should point to this checkout. To use Clang for host compilation:
+The default Ascend build writes the `dvm_py` wheel to `dist/`. The wheel includes `libdvm.so`, the Python extension and the public headers.
+
+To compile the host code with Clang, run the following command.
 
 ```bash
 CXX=clang++ make -j8
 ```
 
-Development setup, CUDA backend build steps, and testing guidance are in the [Contribution Guide](CONTRIBUTING.md).
+See the [Contribution Guide](CONTRIBUTING.md) for backend setup and testing.
 
 ---
 
