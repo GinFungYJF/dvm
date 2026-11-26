@@ -1670,7 +1670,23 @@ class EagerVector : public VectorKernel {
   uint64_t CodeGenV() {
     BuildDomain();
     uint64_t core_total = g_system.CoreNum();
-    return DoCodeGen(core_total);
+    PrepareTiling();
+    if (unlikely(!tile_size_)) {
+      ProcessIdle();
+      return 0;
+    }
+    const int64_t live_peak = Analyze();
+    const int64_t tile_size_limit = TileSizeLimit(live_peak);
+    TileUpdate update;
+    ShapeTiling(tile_size_limit, core_total, update);
+    if (TryDupTiling(update, tile_size_limit)) {
+      return 0;
+    }
+    ApplyTiling(update);
+    if (tile_info_.flags & ObjectMeta::kSimdDim) {
+      AlignSimd(tile_size_limit);
+    }
+    return TileGen(live_peak, core_total);
   }
 
   void Dump(std::ostringstream &oss, const std::string &indent, bool rgraph) {

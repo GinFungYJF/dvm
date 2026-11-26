@@ -45,6 +45,19 @@ def test_tiling_broadcast_part2():
 
 
 @arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.parametrize("mode", ["split", "eager:unify_ws"])
+def test_tiling_broadcast_prime_lead(mode):
+    n = 65537
+    a = np.broadcast_to(np.arange(n, dtype=np.float32) * 0.125, (3, n)).copy()
+    b = np.array([[0.5], [1.0], [2.0]], dtype=np.float32)
+    t = Tester(mode)
+    result = t.sub(t.load(a), t.load(b))
+    t.store_expect(result, a - b)
+    assert t.run_check()
+    assert "vmain.parallel()" in t.das()
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
 def test_tiling_broadcast_all():
     t = Tester()
     a0 = np.random.normal(0, 1, [2, 1, 64, 1024]).astype(np.float32)

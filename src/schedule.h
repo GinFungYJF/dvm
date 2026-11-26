@@ -121,7 +121,7 @@ class SplitSchGen : public SchGenHelper {
 class DupTilingSchGen : public SchGenHelper {
  public:
   explicit DupTilingSchGen(VectorKernel *kernel) : SchGenHelper(kernel) {}
-  int64_t DupCodeGen(int split_dim, int64_t truck_size);
+  void DupCodeGen(int split_dim, int64_t body_size, int64_t tail_size);
 };
 
 class SliceSchGen : public SchGenHelper {

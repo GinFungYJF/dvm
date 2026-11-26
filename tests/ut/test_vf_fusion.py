@@ -39,8 +39,9 @@ def run_codegen_in_child(request):
     env = os.environ.copy()
     env.setdefault("DVM_SOC_NAME", "Ascend950PR_9599")
     env[child_flag] = "1"
+    nodeid = f"{os.path.abspath(__file__)}::{request.node.name}"
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", request.node.nodeid],
+        [sys.executable, "-m", "pytest", "-q", nodeid],
         cwd=str(request.config.rootdir),
         env=env,
         text=True,

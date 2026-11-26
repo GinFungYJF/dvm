@@ -2101,7 +2101,6 @@ void VectorKernel::ProcessIdle() {
 VKernelS::~VKernelS() {
   delete stage_kernel_;
   delete sch_gen_;
-  delete dup_gen_;
   for (auto op : build_ops_) {
     delete op;
   }
@@ -2132,11 +2131,8 @@ uint64_t VKernelS::CodeGen() {
   if (likely(tiles_.empty())) {
     TileUpdate update;
     ShapeTiling(tile_size_limit, core_limit, update);
-    if (update.tile_size * 8 < tile_size_limit && update.tile_num > 256 && tile_region_.depth > 1 &&
-        !(flags_ & K_FLAG_DIS_DUP_TILING)) {
-      if (auto ret = DupTilingGen(tile_region_, update.tile_size, tile_size_limit); ret != -1) {
-        return ret;
-      }
+    if (TryDupTiling(update, tile_size_limit)) {
+      return 0;
     }
     ApplyTiling(update);
   } else {
@@ -2149,37 +2145,47 @@ uint64_t VKernelS::CodeGen() {
   return TileGen(live_peak, core_limit);
 }
 
-int64_t VKernelS::DupTilingGen(const TileRegion &region, int64_t tile_size, int64_t tile_size_limit) {
+VectorKernel::~VectorKernel() { delete dup_gen_; }
+
+bool VectorKernel::TryDupTilingImpl(const TileUpdate &update, int64_t tile_size_limit) {
+  if (static_ops_.size() > 64) {
+    return false;
+  }
+  const auto &region = tile_region_;
+  const int split_dim = region.starts[region.depth - 1];
+  for (auto op : static_ops_) {
+    const auto acc = static_cast<NDAccess *>(op);
+    if (!acc->IsSupportView() || (acc->IsStore() && acc->nd_[split_dim] == 1)) {
+      return false;
+    }
+  }
+  const int64_t section_size = split_dim == 0
+                                 ? RoundDown(tile_size_limit, static_cast<int64_t>(block_align_))
+                                 : tile_size_limit / (update.tile_size / region.last_tile);
+  const int64_t space = region.spaces[region.depth - 1];
+  int64_t tail_size = space % section_size;
+  int64_t body_size = space - tail_size;
+  if (body_size == 0 || tail_size == 0) {
+    return false;
+  }
+  if (tail_size == 1) {
+    body_size = space / 2;
+    tail_size = space - body_size;
+  }
   if (dup_gen_ == nullptr) {
-    for (auto op : static_ops_) {
-      if (!static_cast<NDAccess *>(op)->IsSupportView()) {
-        flags_ |= K_FLAG_DIS_DUP_TILING;
-        return -1;
-      }
-    }
-    if (comm_op_ || shard_) {
-      flags_ |= K_FLAG_DIS_DUP_TILING;
-      return -1;
-    }
     dup_gen_ = new DupTilingSchGen(this);
   }
-  int split_dim = region.starts[region.depth - 1];
   if (int end = region.starts[region.depth - 2] - 1; end > split_dim) {
     TileParam tp;
     tp.start = split_dim;
     tp.end = end;
     tp.num = 1;
-    tp.tile = region.spaces[region.depth - 1];
+    tp.tile = space;
     tp.tail = 0;
     TileProp(tp);
   }
-  int64_t truck_size;
-  if (split_dim == 0) {
-    truck_size = tile_size_limit / block_align_ * block_align_;
-  } else {
-    truck_size = tile_size_limit / (tile_size / region.last_tile);
-  }
-  return dup_gen_->DupCodeGen(split_dim, truck_size);
+  dup_gen_->DupCodeGen(split_dim, body_size, tail_size);
+  return true;
 }
 
 void VKernelS::Append(NDObject *obj) { build_ops_.push_back(obj); }

@@ -47,7 +47,6 @@ class Inspector {
 
 #define K_FLAG_BEGIN ((uint32_t)KernelFlag::kSpeculate)
 #define K_FLAG_SIMT (K_FLAG_BEGIN << 1)
-#define K_FLAG_DIS_DUP_TILING (K_FLAG_BEGIN << 2)
 
 class VKernel {
  public:
@@ -103,6 +102,8 @@ class VKernel {
   std::string dump_str_;
 };
 
+class DupTilingSchGen;
+
 class VectorKernel : public VKernel {
  public:
   explicit VectorKernel(KernelType ktype, uint32_t flags) : VKernel(ktype, flags) {
@@ -112,7 +113,7 @@ class VectorKernel : public VKernel {
     // Reserve the zero instruction terminator before Mix calls TileCollect.
     tile_info_.code_reserve = sizeof(uint64_t);
   }
-  ~VectorKernel() override = default;
+  ~VectorKernel() override;
 
   void Dump(std::ostringstream &oss, const std::string &indent, bool rgraph) override;
 
@@ -234,6 +235,7 @@ class VectorKernel : public VKernel {
   const ShardParam *shard_{nullptr};
 
   VisitCoder *visit_;
+  DupTilingSchGen *dup_gen_{nullptr};
 
   uint64_t local_mem_size_;
   union {
@@ -283,6 +285,13 @@ class VectorKernel : public VKernel {
   int64_t Analyze();
   int64_t TileSizeLimit(int64_t live_peak);
   void ShapeTiling(int64_t size_limit, int64_t core_limit, TileUpdate &update);
+  bool TryDupTiling(const TileUpdate &update, int64_t tile_size_limit) {
+    if (tile_region_.depth <= 1 || update.tile_num <= 256 || update.tile_size * 8 >= tile_size_limit ||
+        comm_op_ || shard_) {
+      return false;
+    }
+    return TryDupTilingImpl(update, tile_size_limit);
+  }
   template <bool dyn_shape>
   void Optimize(std::vector<NDObject *> &objects, std::vector<NDObject *> &mng) {
     if (auto opt = g_system.pass_opt_) {
@@ -325,11 +334,12 @@ class VectorKernel : public VKernel {
   int max_type_;
   int min_type_;
   friend class CodeGenHelper;
+
+ private:
+  bool TryDupTilingImpl(const TileUpdate &update, int64_t tile_size_limit);
 };
 
 class SchGenHelper;
-class DupTilingSchGen;
-
 class VKernelS : public VectorKernel {
  public:
   VKernelS(uint32_t flags = 0) : VectorKernel(KernelType::kVector, flags) {}
@@ -358,7 +368,6 @@ class VKernelS : public VectorKernel {
   void BrokerInit();
   bool BrokerAffine();
   uint64_t BrokerCodeGen(VKernel **hold_kernel);
-  int64_t DupTilingGen(const TileRegion &region, int64_t tile_size, int64_t tile_size_limit);
 
   void Clear() {
     code_.Clear();
@@ -378,7 +387,6 @@ class VKernelS : public VectorKernel {
   int last_broker_;
   VKernel *stage_kernel_{nullptr};
   SchGenHelper *sch_gen_{nullptr};
-  DupTilingSchGen *dup_gen_{nullptr};
 
   struct DimTile {
     int start;

@@ -930,18 +930,9 @@ int64_t SplitSchGen::CodeGen() {
   return 0;
 }
 
-int64_t DupTilingSchGen::DupCodeGen(int split_dim, int64_t truck_size) {
+void DupTilingSchGen::DupCodeGen(int split_dim, int64_t body_size, int64_t tail_size) {
   DimArray dim_space = kernel_->DimSpace();
   int64_t split_size = dim_space[split_dim];
-  int64_t body_size = split_size / truck_size * truck_size;
-  int64_t tail_size = split_size - body_size;
-  if (tail_size == 1) { // avoid x view
-    body_size = split_size / 2;
-    tail_size = split_size  - body_size;
-  }
-  if (body_size == 0 || tail_size == 0) {
-    return -1;
-  }
   auto &static_ops = kernel_->static_ops_;
   uint64_t bcast_mask = 0;
   for (size_t i = 0; i < static_ops.size(); ++i) {
@@ -972,7 +963,6 @@ int64_t DupTilingSchGen::DupCodeGen(int split_dim, int64_t truck_size) {
   helper.Append(body_size);
   helper.Submit();
   ResetStrides();
-  return 0;
 }
 
 SliceSchGen::SliceSchGen(VectorKernel *kernel, NDObject *slice, const std::vector<NDObject *> &objects)
