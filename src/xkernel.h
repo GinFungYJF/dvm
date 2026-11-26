@@ -336,7 +336,6 @@ class _SplitKernel : public VKernel {
     objects_.clear();
     area_used_ = 0;
     kernel_used_ = 0;
-    pv_black_mask_ = 0;
   }
 
   void InitObjInfo(NDObject *obj, int area = -1) {
@@ -371,13 +370,10 @@ class _SplitKernel : public VKernel {
 
   std::vector<std::pair<EagerArea *, EagerArea *>> areas_;
   std::vector<EagerVector *> kernels_;
-  union {
-    int area_used_{0};
-    int kernel_begin_;
-  };
+  int area_used_{0};
   int kernel_used_{0};
   union {
-    uint64_t pv_black_mask_{0};
+    uint64_t extern_code_data_{0};
     void *extern_code_;
   };
   std::vector<NDObject *> objects_;

@@ -1667,75 +1667,10 @@ class EagerVector : public VectorKernel {
     return cube_code;
   }
 
-  enum { kMaxPvNum = 8 };
-  uint64_t CodeGenV(EagerVector **others, int other_num) {
-    uint64_t core_total = g_system.CoreNum();
+  uint64_t CodeGenV() {
     BuildDomain();
-    if (other_num == 0) {
-      return DoCodeGen(core_total);
-    }
-    PrepareTiling();
-    std::pair<EagerVector *, uint64_t> children[EagerVector::kMaxPvNum + 1];
-    uint64_t total_load = 0;
-    uint64_t code_reserve = 0;
-    int child_num = 0;
-    int max_idx = 0;
-    for (int i = 0; i < other_num + 1; ++i) {
-      EagerVector *kernel;
-      if (i < other_num) {
-        kernel = others[i];
-        kernel->BuildDomain();
-        kernel->PrepareTiling();
-      } else {
-        kernel = this;
-      }
-      uint64_t load = kernel->tile_size_ * kernel->objects_.size();
-      if (load > 0) {
-        auto &node = children[child_num];
-        node.first = kernel;
-        node.second = load;
-        if (max_idx > 0 && load >= children[max_idx].second) {
-          max_idx = child_num;
-        }
-        total_load += load;
-        child_num++;
-        code_reserve += kernel->ReserveCodeSize();
-      }
-    }
-    if (unlikely(child_num == 0)) {
-      static_ops_.clear();
-      CollectIdle(static_ops_);
-      for (int i = 0; i < other_num; ++i) {
-        others[i]->CollectIdle(static_ops_);
-      }
-      UpdateIdle(static_ops_);
-      return 0;
-    }
-    if (max_idx != child_num - 1) {
-      std::swap(children[max_idx], children[child_num - 1]); // avoid blockdim overflow
-    }
-    PCodeEncoder encoder;
-    encoder.Reset(&code_, Code::kTargetVec, child_num, code_reserve);
-    uint64_t block_begin = 0;
-    for (int i = 0; i < child_num; ++i) {
-      auto k = children[i].first;
-      uint64_t workload = children[i].second;
-      uint64_t core_limit = std::max((core_total - block_begin) * workload / total_load, 1ul);
-      auto code_begin = encoder.ProgData();
-      uint64_t code_size = k->DoCodeGen(core_limit, code_begin, k->ReserveCodeSize()) - code_begin;
-      ASSERT(k->visit_ == nullptr);
-      uint64_t block_dim = k->CompactBlockDim(core_limit);
-      total_load -= workload;
-      auto prog = encoder.Append(Code::GenEntryV(k->tile_num_, block_dim, code_size), code_size);
-      encoder.AssignAiv(block_begin, block_dim, prog);
-      block_begin += block_dim;
-      if (k != this) {
-        code_.Combine(k->code_, 0);
-      }
-    }
-    encoder.Submit(block_begin);
-    ASSERT(block_begin <= core_total);
-    return 0;
+    uint64_t core_total = g_system.CoreNum();
+    return DoCodeGen(core_total);
   }
 
   void Dump(std::ostringstream &oss, const std::string &indent, bool rgraph) {
@@ -1763,7 +1698,7 @@ class EagerVector : public VectorKernel {
 
 class EagerArea {
  public:
-  enum { kFree = 0, kPending, kSubmitted };
+  enum { kPending = 0, kSubmitted };
 
   static constexpr uint64_t kPatReduce = 1;
   static constexpr uint64_t kPatView = 2;
@@ -1848,7 +1783,6 @@ class EagerArea {
     }
     k->kernel_used_++;
     area->area_id_ = aid;
-    area->depend_mask_ = 1ul << aid;
     return area;
   }
 
@@ -1858,7 +1792,6 @@ class EagerArea {
   uint64_t pattern_;
   std::vector<NDObject *> objects_;
   std::vector<EagerArea *> fused_;
-  uint64_t depend_mask_;
 };
 
 SplitContext::SplitContext() {
@@ -1935,16 +1868,7 @@ void SplitContext::Free(void *addr, size_t size) {
   }
 }
 
-static int g_eager_pv_width = -1;
 _SplitKernel::_SplitKernel(KernelType type, uint32_t flags) : VKernel(type, flags) {
-  if (g_eager_pv_width == -1) {
-    if (const char *width = getenv("DVM_EAGER_PV_WIDTH"); width != nullptr) {
-      g_eager_pv_width = std::stoi(width);
-    } else {
-      g_eager_pv_width = 0;
-    }
-    ASSERT(g_eager_pv_width <= EagerVector::kMaxPvNum);
-  }
   temp_vec_.reserve(24);
 }
 
@@ -1991,7 +1915,6 @@ void _SplitKernel::Split(NDObject *root) {
     if (op->IsLoad()) {
       if (auto store = GetStore(op); store != nullptr && store->IsStore()) { // reduce pre-split
         auto a = areas_[GetArea(store)].second;
-        area->depend_mask_ |= a->depend_mask_;
         a->state_ = EagerArea::kSubmitted;
       }
       if (op->obj_id_ == ObjectType::kViewLoad) {
@@ -2021,7 +1944,6 @@ void _SplitKernel::Split(NDObject *root) {
       }
       v->dom_ = c->dom_;
       v->pattern_ |= EagerArea::kPatCubeVec;
-      pv_black_mask_ |= 1ul << v->area_id_;
       return true;
     };
     for (auto exchange: exchange_cache_) {
@@ -2044,8 +1966,6 @@ void _SplitKernel::Split(NDObject *root) {
             }
           }
           kernel_used_--;
-          pv_black_mask_ |= 1ul << a->area_id_;
-          area->depend_mask_ |= a->depend_mask_;
           continue;
         }
         if (!input->IsLoad()) {
@@ -2064,13 +1984,11 @@ void _SplitKernel::Split(NDObject *root) {
           ASSERT(store != nullptr && store->IsStore());
           SetStore(load, store);
           auto a = areas_[GetArea(store)].second;
-          area->depend_mask_ |= a->depend_mask_;
           a->state_ = EagerArea::kSubmitted;
         }
         load->Normalize(a->objects_);
         objects_.push_back(load);
       } else {
-        area->depend_mask_ |= a->depend_mask_;
         load = Exchange(input, area->area_id_);
       }
       input = load;
@@ -2123,8 +2041,7 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
   mm->NormalizeCube();
   CubeOptimizer opt(mm);
   auto &temp_ops = temp_vec_;
-  uint64_t dep_mask = 0;
-  auto prepare_input = [this, &dep_mask, &temp_ops](bool is_stuff, NDObject *&input) {
+  auto prepare_input = [this, &temp_ops](bool is_stuff, NDObject *&input) {
     if (is_stuff) {
       for (auto op : temp_ops) {
         InitObjInfo(op);
@@ -2137,7 +2054,6 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
       SetStore(input, store);
       auto aid = GetArea(store);
       areas_[aid].second->state_ = EagerArea::kSubmitted;
-      dep_mask |= 1ul << aid;
     } else if (input->IsSimd()) {
       auto aid = GetArea(input);
       if (aid == -1) {
@@ -2147,7 +2063,6 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
       auto area = areas_[aid].second;
       input = Exchange(input, area_used_);
       area->state_ = EagerArea::kSubmitted;
-      dep_mask |= 1ul << aid;
     } else if (input->flags_ & OBJ_FLAG_EAGER) { // exclusive cube input to avoid fused
       auto acc = static_cast<NDAccess *>(input);
       acc->addr_.Update(&acc->addr_.data);
@@ -2159,11 +2074,10 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
     }
     SetArea(input, area_used_);
   };
-  auto exchange_cube = [this, &dep_mask](NDObject *input) {
+  auto exchange_cube = [this](NDObject *input) {
     auto aid = GetArea(input);
     ASSERT(aid != -1);
     areas_[aid].second->state_ = EagerArea::kSubmitted;
-    dep_mask |= 1ul << aid;
     return Exchange(input, area_used_);
   };
   if (mm->lhs_->IsCube()) {
@@ -2189,9 +2103,6 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
       int aid = area_used_++;
       auto area = EagerArea::Assign(this, aid);
       area->ResetMix(op, EagerArea::kSubmitted);
-      area->depend_mask_ |= dep_mask;
-      dep_mask |= 1ul << aid;
-      pv_black_mask_ |= 1ul << aid;
       objects_.push_back(op);
     }
     ret = temp_ops.back();
@@ -2209,12 +2120,10 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
     }
   }
   area->ResetMix(mm, state);
-  area->depend_mask_ |= dep_mask;
   SetArea(mm, aid);
   SetStore(mm, output);
   InitStoreInfo(output, aid);
   objects_.push_back(mm);
-  pv_black_mask_ |= 1ul << aid;
   return ret;
 }
 
@@ -2312,11 +2221,11 @@ void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAlloc
   }
   ctx_->MemReset();
   uint64_t extern_code_size = 0;
-  int kernel_begin = 0;
-  while (area_used_ > 0 && kidx > kernel_begin) {
-    auto area = areas_[--area_used_].second;
-    if (area->state_ == EagerArea::kFree) continue;
-    area->state_ = EagerArea::kFree;
+  int area_used = area_used_;
+  area_used_ = 0;
+  while (kidx > 0) {
+    auto area = areas_[--area_used].second;
+    if (area->area_id_ != area_used) continue;
     auto kernel = kernels_[--kidx];
     BuildKernel(kernel, area, ws_alloc);
     if (area->dom_->IsCube()) {
@@ -2361,21 +2270,7 @@ void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAlloc
         ctx_->Free(output->addr_.gm, GetStoreSize(output));
       }
     } else {
-      EagerVector **pv_kernels = nullptr;
-      int pv_num = 0;
-      if (uint64_t pv_mask = ~(area->depend_mask_ | pv_black_mask_) & ((1ul << area_used_) - 1); pv_mask > 0) {
-        pv_kernels = kernels_.data() + kernel_begin;
-        for (; pv_mask && pv_num < g_eager_pv_width; ++pv_num) {
-          int area_id = 63 - __builtin_clzl(pv_mask);
-          pv_mask &= ~(1ul << area_id);
-          pv_black_mask_ |= 1ul << area_id;
-          auto a = areas_[area_id].second;
-          a->state_ = EagerArea::kFree;
-          auto k = kernels_[kernel_begin++];
-          BuildKernel(k, a, ws_alloc);
-        }
-      }
-      if (uint64_t ws_size = kernel->EagerVector::CodeGenV(pv_kernels, pv_num); ws_size > 0) {
+      if (uint64_t ws_size = kernel->EagerVector::CodeGenV(); ws_size > 0) {
         void *ws_mem;
         if (auto mem = ctx_->Alloc(ws_size)) {
           ws_mem = mem->addr;
@@ -2391,7 +2286,7 @@ void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAlloc
     if (uint64_t code_size = kernel->code_.ReserveWorkspace(0); code_size > extern_code_size) {
       extern_code_size = code_size;
     }
-    if (kidx > kernel_begin + 1) {
+    if (kidx > 1) {
       for (auto &kill : ctx_->kill_) {
         if (kill.first) {
           ctx_->Free(kill.first->addr_.gm, kill.second);
@@ -2400,7 +2295,6 @@ void _SplitKernel::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAlloc
     }
     ctx_->kill_.clear();
   }
-  kernel_begin_ = kernel_begin;
   extern_code_ = extern_code_size ? ws_alloc->Alloc(extern_code_size) : nullptr;
 }
 
@@ -2432,7 +2326,7 @@ void _SplitKernel::Dump(std::ostringstream &oss, const std::string &indent, bool
   if (rgraph) {
     EagerDumpRef helper(oss);
     oss << "rgraph.eager() {" << std::endl;
-    if (kernel_begin_ >= kernel_used_) {
+    if (area_used_) {
       for (auto op : objects_) {
         if (!op->IsStore() && (op->flags_ & OBJ_FLAG_EAGER)) {
           oss << body_indent;
@@ -2448,14 +2342,8 @@ void _SplitKernel::Dump(std::ostringstream &oss, const std::string &indent, bool
     }
   } else {
     oss << "vgraph.eager() {" << std::endl;
-    if (kernel_begin_ < kernel_used_) {
-      for (int i = 0; i < kernel_begin_; ++i) {
-        auto k = kernels_[i];
-        oss << body_indent << "// pv_merged " << i << std::endl;
-        k->Dump(oss, body_indent, rgraph);
-        oss << std::endl;
-      }
-      for (int i = kernel_begin_; i < kernel_used_; ++i) {
+    if (area_used_ == 0) {
+      for (int i = 0; i < kernel_used_; ++i) {
         auto k = kernels_[i];
         oss << body_indent << "// eager " << i << std::endl;
         k->Dump(oss, body_indent, rgraph);
@@ -2468,10 +2356,12 @@ void _SplitKernel::Dump(std::ostringstream &oss, const std::string &indent, bool
 
 std::string &_SplitKernel::DisAssemble() {
   std::ostringstream oss;
-  for (int i = kernel_begin_; i < kernel_used_; ++i) {
-    oss << "// eager " << i << std::endl;
-    kernels_[i]->code_.DisAssemble(oss);
-    oss << std::endl;
+  if (area_used_ == 0) {
+    for (int i = 0; i < kernel_used_; ++i) {
+      oss << "// eager " << i << std::endl;
+      kernels_[i]->code_.DisAssemble(oss);
+      oss << std::endl;
+    }
   }
   dump_str_ = oss.str();
   return dump_str_;
@@ -2479,12 +2369,12 @@ std::string &_SplitKernel::DisAssemble() {
 
 int _SplitKernel::Launch(void *stream) {
   if (likely(!g_system.enable_profile_)) {
-    for (int i = kernel_begin_; i < kernel_used_; ++i) {
+    for (int i = 0; i < kernel_used_; ++i) {
       kernels_[i]->code_.Launch(extern_code_, stream);
     }
     return 0;
   }
-  for (int i = kernel_begin_; i < kernel_used_; ++i) {
+  for (int i = 0; i < kernel_used_; ++i) {
     MsprofHelper msprof_helper;
     auto &info = msprof_helper.info_;
     auto vector_kernel = kernels_[i];
@@ -2571,10 +2461,9 @@ void _SplitKernel::SlotCodeGen(const RelocEntry *relocs, size_t reloc_size) {
   SlotWsAllocator slot_alloc(ctx_->slot_ws_);
   _SplitKernel::CodeGenR(relocs, reloc_size, &slot_alloc);
   if (extern_code_) {
-    // extern_code_ shares storage with pv_black_mask_. Relocate the code workspace too.
-    add_reloc(pv_black_mask_);
+    add_reloc(extern_code_data_);
   }
-  for (int i = kernel_begin_; i < kernel_used_; ++i) {
+  for (int i = 0; i < kernel_used_; ++i) {
     auto kernel = kernels_[i];
     if (auto mm = kernel->mm_) {
       auto code = reinterpret_cast<vCubeOp *>(kernel->code_.data_ + Code::HeadSize());
@@ -2627,7 +2516,7 @@ void _SplitKernel::SlotCodeGen(const RelocEntry *relocs, size_t reloc_size) {
 
 void _SplitKernel::RelocBinds() {
   code_.RelocOpsBind();
-  for (int i = kernel_begin_; i < kernel_used_; ++i) {
+  for (int i = 0; i < kernel_used_; ++i) {
     auto &code = kernels_[i]->code_;
     code.RelocOpsBind();
     if (code.bind_wss_) {
@@ -2897,7 +2786,6 @@ uint64_t SplitEagerLazy::AllocArea(const EagerArea *area, WsAllocator *ws_alloc)
 }
 
 void SplitEagerLazy::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAllocator *ws_alloc) {
-  ASSERT(g_eager_pv_width == 0);
   for (auto reloc = relocs; reloc < relocs + reloc_size; ++reloc) {
     static_cast<NDAccess *>(reloc->io)->addr_.gm = reloc->addr;
   }
@@ -2911,12 +2799,11 @@ void SplitEagerLazy::CodeGenR(const RelocEntry *relocs, size_t reloc_size, WsAll
   uint64_t max_code_size = 0;
   bool has_mix = false;
   int area_used = area_used_;
-  while (area_used > 0) {
+  while (kidx > 0) {
     auto area = areas_[--area_used].second;
-    if (area->state_ == EagerArea::kFree) {
+    if (area->area_id_ != area_used) {
       continue;
     }
-    area->state_ = EagerArea::kFree;
     SetLazyArea(kernels_[--kidx], area);
     uint64_t code_size = AllocArea(area, ws_alloc);
     if (area->dom_->IsCube()) {
@@ -3037,7 +2924,7 @@ void SplitEagerLazy::GenKernel(EagerVector *kernel) {
       cube_code->gm_pos = reinterpret_cast<uint64_t>(ws_mem_);
     }
   } else {
-    if (uint64_t ws_size = kernel->EagerVector::CodeGenV(nullptr, 0); ws_size > 0) {
+    if (uint64_t ws_size = kernel->EagerVector::CodeGenV(); ws_size > 0) {
       ASSERT(ws_size <= pre_ws_size_);
       for (auto op = kernel->code_.bind_wss_; op != nullptr; op = op->bind_list_) {
         op->Reloc(static_cast<char *>(ws_mem_) + op->ws);
@@ -3048,7 +2935,7 @@ void SplitEagerLazy::GenKernel(EagerVector *kernel) {
 }
 
 int SplitEagerLazy::Launch(void *stream) {
-  kernel_begin_ = 0; // only for dump
+  area_used_ = 0;
   if (unlikely(g_system.enable_profile_)) {
     for (int i = 0; i < kernel_used_; ++i) {
       GenKernel(kernels_[i]);
