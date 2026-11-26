@@ -8,3 +8,6 @@
 
 # If the file in PR does not match rule, the default maintainer gaoxiong-1 will be designated to conduct code review.
 * @gaoxiong-1
+
+# The maintainers of packages.
+/packages/ @gaoxiong-1 @GinFungYJF
