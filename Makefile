@@ -26,6 +26,8 @@ OBJ += msprof.o comm.o
 CFLAGS = --std=c++17 -Werror -Wall -I./include -I${ASCEND_HOME_PATH}/include -I${ASCEND_HOME_PATH}/pkg_inc ${DVM_CUSTOM_FLAGS} -fPIC -fvisibility=hidden
 CFLAGS += -fstack-protector-all -Wno-array-bounds
 LDFLAGS += -Wl,-z,relro,-z,now,-z,noexecstack
+CANN_HCC := $(ASCEND_HOME_PATH)/toolkit/toolchain/hcc
+CANN_HCC_TARGET = $(shell $(firstword $(wildcard $(CANN_HCC)/bin/*-g++)) -dumpmachine)
 CCE_FLGAS_C220 = --std=c++17 -Wno-int-to-pointer-cast\
 				 --cce-aicore-only\
                  --cce-auto-sync=off \
@@ -35,12 +37,8 @@ CCE_FLGAS_C220 = --std=c++17 -Wno-int-to-pointer-cast\
                  -mllvm -cce-aicore-jump-expand=true \
                  -mllvm -cce-aicore-mask-opt=false
 
-# C310 AscendC headers use C++17 type traits. ccec can pick an older system
-# libstdc++, so take the C++-only include paths from the host compiler.
-cxx_include_dirs = $(shell LC_ALL=C $(CXX) -E -x c++ -v $(1) /dev/null 2>&1 | \
-                          sed -n '/search starts here:/,/End of search list/s/^ //p')
-CXX_STDLIB_DIRS := $(filter-out $(call cxx_include_dirs,-nostdinc++),$(call cxx_include_dirs))
-CCE_FLGAS_C310 = --std=c++17 $(foreach dir,$(CXX_STDLIB_DIRS),-stdlib++-isystem $(dir)) \
+CCE_FLGAS_C310 = --std=c++17 --target=$(CANN_HCC_TARGET) \
+                 --gcc-toolchain=$(CANN_HCC) --sysroot=$(CANN_HCC)/sysroot \
                  -Wno-int-to-pointer-cast \
                  --cce-aicore-only \
                  --cce-auto-sync=off \
