@@ -363,7 +363,7 @@ class _SplitKernel : public VKernel {
     return store->addr_.gm;
   }
 
-  void Split(NDObject *root);
+  void Split(NDObject *root, NDObject *dom, uint64_t pattern = 0);
   NDObject *Exchange(NDObject *input, int to_aid);
   void BuildKernel(EagerVector *kernel, const EagerArea *area, WsAllocator *alloc);
   void RelocBinds();

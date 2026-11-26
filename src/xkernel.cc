@@ -1710,16 +1710,10 @@ class EagerArea {
   }
   ~EagerArea() = default;
 
-  void Reset(NDObject *dom) {
-    if (dom->obj_id_ != kReduce) {
-      dom_ = dom;
-      state_ = kPending;
-      pattern_ = 0;
-    } else {
-      dom_ = dom->lhs_;
-      state_ = kSubmitted;
-      pattern_ = kPatReduce;
-    }
+  void Reset(NDObject *dom, uint64_t pattern) {
+    dom_ = dom;
+    pattern_ = pattern;
+    state_ = kPending;
     objects_.clear();
     fused_.clear();
   }
@@ -1732,7 +1726,7 @@ class EagerArea {
     fused_.clear();
   }
 
-  bool FuseCheck(EagerArea *a) {
+  bool FuseCheck(EagerArea *a, const std::vector<NDObject **> &exchanges) {
     ASSERT(dom_ != nullptr);
     const auto &dom_nd = dom_->nd_;
     const auto &op_nd = a->dom_->nd_;
@@ -1741,6 +1735,11 @@ class EagerArea {
     }
     for (size_t i = 0; i < op_nd.size(); ++i) {
       if (dom_nd[i] != op_nd[i]) return false;
+    }
+    if (pattern_ | kPatReduce) {
+      for (auto e : exchanges) {
+        if ((*e)->obj_id_ == kReduce) return false;
+      }
     }
     return true;
   }
@@ -1901,10 +1900,10 @@ NDObject *_SplitKernel::Exchange(NDObject *input, int to_aid) {
   return load;
 }
 
-void _SplitKernel::Split(NDObject *root) {
+void _SplitKernel::Split(NDObject *root, NDObject *dom, uint64_t pattern) {
   int kidx = area_used_++;
   EagerArea *area = EagerArea::Assign(this, kidx);
-  area->Reset(root);
+  area->Reset(dom, pattern);
   SetArea(root, kidx);
   auto &stack = temp_vec_;
   stack.push_back(root);
@@ -1946,19 +1945,24 @@ void _SplitKernel::Split(NDObject *root) {
       v->pattern_ |= EagerArea::kPatCubeVec;
       return true;
     };
+    constexpr int kAidEnd = 100000;
+    int max_submit_id = -1;
+    size_t eidx = 0;
     for (auto exchange: exchange_cache_) {
       NDObject *&input = *exchange;
       auto a = areas_[GetArea(input)].second;
+      auto aid = a->area_id_;
       if (a == area) {
         if (input->IsCube()) {
-          input = Exchange(input, a->area_id_);
+          input = Exchange(input, aid);
         }
         continue;
       }
       if (a->state_ == EagerArea::kPending) {
-        if (area->FuseCheck(a) && (!a->dom_->IsCube() || cube_check(a, area, input))) {
+        max_submit_id = kAidEnd;
+        if (area->FuseCheck(a, exchange_cache_) && (!a->dom_->IsCube() || cube_check(a, area, input))) {
           area->fused_.push_back(a);
-          areas_[a->area_id_].second = area;
+          areas_[aid].second = area;
           if (!a->fused_.empty()) {
             for (auto x : a->fused_) {
               area->fused_.push_back(x);
@@ -1971,21 +1975,39 @@ void _SplitKernel::Split(NDObject *root) {
         if (!input->IsLoad()) {
           a->state_ = EagerArea::kSubmitted;
         }
+      } else if (aid > max_submit_id) {
+        max_submit_id = aid;
+      }
+      exchange_cache_[eidx++] = exchange;
+    }
+    if (max_submit_id >= 0 && max_submit_id < kAidEnd) {
+      auto a = areas_[max_submit_id].second;
+      if (area->FuseCheck(a, exchange_cache_) && !a->dom_->IsCube()) {
+        area->fused_.push_back(a);
+        areas_[a->area_id_].second = area;
+        area->area_id_ = a->area_id_;
+        if (!a->fused_.empty()) {
+          for (auto x : a->fused_) {
+            area->fused_.push_back(x);
+            areas_[x->area_id_].second = area;
+          }
+        }
+        kernel_used_--;
+      }
+    }
+    for (size_t i = 0; i < eidx; ++i) {
+      NDObject *&input = *exchange_cache_[i];
+      auto a = areas_[GetArea(input)].second;
+      if (a == area) {
+        continue;
       }
       NDObject *load;
       if (input->IsLoad()) {
         auto ac = static_cast<NDAccess *>(input);
         load = new NDLoad(nullptr, ac->shape_ref_, ac->type_id_);
-        if (input->CheckFlag(OBJ_FLAG_EAGER)) {
-          SetStore(load, input);  // TRICK: force load entry wss alloc as swap load to update its gm
-          SetStoreSize(ac, 0);
-        } else {
-          auto store = GetStore(input);
-          ASSERT(store != nullptr && store->IsStore());
-          SetStore(load, store);
-          auto a = areas_[GetArea(store)].second;
-          a->state_ = EagerArea::kSubmitted;
-        }
+        ASSERT(input->CheckFlag(OBJ_FLAG_EAGER));
+        SetStore(load, input);  // TRICK: force load entry wss alloc as swap load to update its gm
+        SetStoreSize(ac, 0);
         load->Normalize(a->objects_);
         objects_.push_back(load);
       } else {
@@ -2006,24 +2028,12 @@ void _SplitKernel::Append(NDObject *obj) {
     auto src = obj->lhs_;
     auto area_id = GetArea(src);
     if (area_id == -1) {
-      Split(src);
+      Split(src, src);
       area_id = GetArea(src);
     }
     SetStore(src, obj);
     InitStoreInfo(obj, area_id);
   } else {
-    obj->ForInput([this](NDObject *&op) {
-      if (op->obj_id_ == ObjectType::kReduce || op->obj_id_ == ObjectType::kReshape) {
-        if (GetArea(op) == -1) {
-          if (op->obj_id_ == ObjectType::kReshape) {
-            op->Ndd()->dims = op->lhs_->nd_.dims();
-          }
-          Split(op);
-        }
-        op = Exchange(op, -1);
-        SetArea(op, -1);
-      }
-    });
     InitObjInfo(obj);
     auto add_idx = objects_.size();
     obj->Normalize(objects_);
@@ -2031,6 +2041,12 @@ void _SplitKernel::Append(NDObject *obj) {
       while (add_idx < objects_.size()) {
         InitObjInfo(objects_[add_idx++]);
       }
+    }
+    if (obj->obj_id_ == ObjectType::kReduce) {
+      Split(obj, obj->lhs_, EagerArea::kPatReduce);
+    } else if (obj->obj_id_ == ObjectType::kReshape) {
+      Split(obj, obj->lhs_);
+      areas_[GetArea(obj)].second->state_ = EagerArea::kSubmitted;
     }
   }
   objects_.push_back(obj);
@@ -2050,14 +2066,14 @@ NDObject *_SplitKernel::AppendCube(CubeOp *mm) {
       auto store = temp_ops[temp_ops.size() - 2];
       temp_ops.clear();
       InitStoreInfo(store);
-      Split(store);
+      Split(store, store);
       SetStore(input, store);
       auto aid = GetArea(store);
       areas_[aid].second->state_ = EagerArea::kSubmitted;
     } else if (input->IsSimd()) {
       auto aid = GetArea(input);
       if (aid == -1) {
-        Split(input);
+        Split(input, input);
         aid = GetArea(input);
       }
       auto area = areas_[aid].second;
@@ -2149,6 +2165,22 @@ void _SplitKernel::BuildKernel(EagerVector *kernel, const EagerArea *area, WsAll
       }
     } else if (auto store = GetStore(op); store && store->addr_.gm) {
       ASSERT(store->SharedNdd());
+      if (op->obj_id_ == kReshape) {
+        op->Ndd()->dims = op->lhs_->nd_.dims();
+      } else if (op->obj_id_ == kReduce && !static_cast<ReduceOp *>(op)->KeepDims()) {
+        auto &dims = op->Ndd()->dims;
+        auto &input = op->lhs_->nd_.dims();
+        int d = dims.size() - 1;
+        dims.resize(input.size());
+        for (int i = input.size() - 1; i >= 0; --i) {
+          if (input[i] == dims[d]) {
+            dims[i] = input[i];
+            d--;
+          } else {
+            dims[i] = 1;
+          }
+        }
+      }
       store->nd_.data = op->nd_.data;
       kernel->EagerVector::Append(store);
       if (!GetStoreInplace(store)) {

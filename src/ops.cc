@@ -3116,6 +3116,12 @@ void ReduceOp::Normalize(std::vector<NDObject *> &run_ops) {
       shape_.Resize(out_size);
     }
   }
+  if (!keepdims_ && (flags_ & OBJ_FLAG_EAGER)) {
+    ndd_.Reset(shape_.size);
+    for (size_t i = 0; i < shape_.size; ++i) {
+      ndd_.dims[i] = shape_[shape_.size - 1 - i];
+    }
+  }
   if (visit_) {
     visit_->Clear();
   }
