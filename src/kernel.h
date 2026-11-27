@@ -201,7 +201,7 @@ class VectorKernel : public VKernel {
     if (auto index = load->index_; index < 64) {
       for (size_t i = load_num_; i < static_ops_.size(); ++i) {
         auto store = static_cast<NDAccess *>(static_ops_[i]);
-        if ((store->io_reuse_mask_ & (1ull << index)) && store->type_id_ == load->type_id_ && check(store)) {
+        if ((store->io_reuse_mask_ & (1ull << index)) && ITEM_SIZE[store->type_id_] == ITEM_SIZE[load->type_id_] && check(store)) {
           return store;
         }
       }

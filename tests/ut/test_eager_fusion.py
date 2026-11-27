@@ -911,3 +911,16 @@ def test_eager_lazy_vector_ws():
     t.store_expect(x, np.sum(a * 1.5, dims, keepdims=True) + 0.1)
     assert(t.run_check())
     t.set_deterministic(False)
+
+
+@arg_mark(plat_marks=['platform_ascend910b'], level_mark='level0', card_mark='onecard', essential_mark='essential')
+@pytest.mark.parametrize('mode', ["eager", "eager:lazy"])
+def test_eager_inout_inplace_reuse(mode):
+    t = Tester(mode)
+    a = np.random.normal(-0.5, 0.5, [1024, 32]).astype(np.float32)
+    x0 = t.load(a)
+    x1 = t.mul(x0, 0.8)
+    x2 = t.sum(x1, (1,), True)
+    x3 = t.add(x1, x2)
+    t.store_expect(x3, a * 0.8 + np.sum(a * 0.8, (1,), keepdims=True))
+    assert(t.run_check())

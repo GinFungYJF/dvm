@@ -1760,32 +1760,6 @@ class EagerArea {
     return true;
   }
 
-  void InOutReusePlan() const {
-    uint32_t index = 0;
-    size_t fused_size = fused_.size();
-    const EagerArea *cur = nullptr;
-    do {
-      cur = fused_size ? fused_[--fused_size] : this;
-      for (auto it = cur->objects_.rbegin(); it != cur->objects_.rend(); ++it) {
-        auto op = *it;
-        if (op->IsLoad()) {
-          op->index_ = index;
-          op->io_reuse_mask_ = index < 64 ? (1ull << op->index_) : 0;
-          index++;
-        } else {
-          uint64_t mask = 0;
-          if (op->InplaceProp()) {
-            op->ForInput([&mask](NDObject *in) { mask |= in->io_reuse_mask_; });
-          }
-          op->io_reuse_mask_ = mask;
-          if (auto store = _SplitKernel::GetStore(op); store != nullptr) {
-            store->io_reuse_mask_ = mask;
-          }
-        }
-      }
-    } while (cur != this);
-  }
-
   static EagerArea *Assign(_SplitKernel *k, size_t aid) {
     EagerArea *area;
     auto &pool = k->areas_;
@@ -2206,7 +2180,6 @@ void _SplitKernel::BuildKernel(EagerVector *kernel, const EagerArea *area, WsAll
     SetArea(op, -1);
   };
   kernel->Reset(area->dom_);
-  size_t kill_begin = ctx_->kill_.size();
   size_t fused_size = area->fused_.size();
   auto &stack = ctx_->build_;
   const EagerArea *cur = nullptr;
@@ -2239,8 +2212,8 @@ void _SplitKernel::BuildKernel(EagerVector *kernel, const EagerArea *area, WsAll
           reuse_plan = true;
           kernel->InOutReusePlan(&area->dom_->nd_.dims());
         }
-        for (auto it = ctx_->kill_.begin() + kill_begin; it != ctx_->kill_.end(); ++it) {
-          if (auto r = it->first; r != nullptr && (r->io_reuse_mask_ & (1ull << gen_idx)) && r->type_id_ == gen->type_id_) {
+        for (auto it = ctx_->kill_.begin(); it != ctx_->kill_.end(); ++it) {
+          if (auto r = it->first; r != nullptr && (r->io_reuse_mask_ & (1ull << gen_idx)) && ITEM_SIZE[r->type_id_] == ITEM_SIZE[gen->type_id_]) {
             store->addr_.gm = r->addr_.gm;
             it->first = nullptr;
             inplaced = true;
@@ -2787,8 +2760,8 @@ uint64_t SplitEagerLazy::AllocArea(const EagerArea *area, WsAllocator *ws_alloc)
     } else if (auto store = GetStore(op); store && store->addr_.gm && !GetStoreInplace(store)) {
       ctx_->kill_.emplace_back(store, GetStoreSize(store));
     }
+    op->io_reuse_mask_ = 0;
   };
-  size_t kill_begin = ctx_->kill_.size();
   size_t node_count = area->objects_.size();
   for (auto op : area->objects_) {
     collect_livesss(op);
@@ -2802,22 +2775,34 @@ uint64_t SplitEagerLazy::AllocArea(const EagerArea *area, WsAllocator *ws_alloc)
     }
   }
   bool reuse_plan = false;
-  auto &dom_dims = area->dom_->nd_.dims();
   for (auto gen : ctx_->gen_) {
     auto store = GetStore(gen);
     if (store->addr_.gm == nullptr) {
-      if (!reuse_plan) {
-        reuse_plan = true;
-        area->InOutReusePlan();
-      }
       bool inplaced = false;
-      auto gen_idx = gen->index_;
-      if (gen_idx < 64 && gen->obj_id_ == ObjectType::kLoad && gen->nd_.dims() == dom_dims) {
-        for (auto it = ctx_->kill_.begin() + kill_begin; it != ctx_->kill_.end(); ++it) {
-          auto r = it->first;
-          if (r != nullptr && (r->io_reuse_mask_ & (1ull << gen_idx)) && r->type_id_ == gen->type_id_) {
+      if (gen->obj_id_ == ObjectType::kLoad && gen->nd_.dims() == area->dom_->nd_.dims()) {
+        if (!reuse_plan && !ctx_->kill_.empty()) {
+          reuse_plan = true;
+          for (size_t i = 0; i < ctx_->kill_.size(); ++i) {
+            auto k = ctx_->kill_[i].first;
+            k->io_reuse_mask_ = 1ull << i;
+            temp_vec_.push_back(k);
+          }
+          while (!temp_vec_.empty()) {
+            auto top = temp_vec_.back();
+            temp_vec_.pop_back();
+            if (top->InplaceProp()) {
+              top->ForInput([this, top](NDObject *in) {
+                in->io_reuse_mask_ |= top->io_reuse_mask_;
+                temp_vec_.push_back(in);
+              });
+            }
+          }
+        }
+        for (size_t i = 0; i < ctx_->kill_.size(); ++i) {
+          auto r = ctx_->kill_[i].first;
+          if (r != nullptr && ((gen->io_reuse_mask_ >> i) & 1u) && ITEM_SIZE[r->type_id_] == ITEM_SIZE[gen->type_id_]) {
             store->addr_.gm = r->addr_.gm;
-            it->first = nullptr;
+            ctx_->kill_[i].first = nullptr;
             inplaced = true;
             break;
           }
