@@ -161,6 +161,8 @@ For graph-mode and eager-mode fusion in TorchNPU, follow the [integration guide]
 - [Operator Development Guide](docs/tutorial.md) — Architecture, C++ API usage, and execution modes (Chinese)
 - [TorchNPU Integration](docs/pytorch.md) — Graph-mode fusion, eager fusion, and custom operators (Chinese)
 - [Development Notes](docs/development.md) — Operator restrictions and simulator debugging (Chinese)
+- [Development Skills](.agents/skills/) — Design and development, debugging, and codebase quality (Chinese)
+- [Knowledge Base](.agents/knowledge/README.md) — APIs, fusion rules, optimization methods, and debug output (Chinese)
 - [Examples](examples) — Python kernels and C++ integration
 - [C++ API](include/dvm.h) · [Python API](python/dvm/_dvm_py.pyi) — Interface definitions
 - [Contributing](CONTRIBUTING.md) — Development setup, testing, pull requests, and review

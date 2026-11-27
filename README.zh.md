@@ -152,6 +152,8 @@ C++ 应用需包含 DVM 头文件并链接 `libdvm.a`，具体见 [C++ 示例](e
 - [算子开发指南](docs/tutorial.md) — 架构、C++ API 使用与执行模式
 - [TorchNPU 接入指南](docs/pytorch.md) — 图模式融合、Eager 融合与自定义算子
 - [开发技巧](docs/development.md) — 算子限制与仿真调试
+- [开发技能](.agents/skills/) — 设计与开发、问题调试、代码仓质量
+- [知识库](.agents/knowledge/README.md) — API、融合规则、优化方法和调试输出
 - [示例](examples) — Python Kernel 与 C++ 集成
 - [C++ API](include/dvm.h) · [Python API](python/dvm/_dvm_py.pyi) — 接口定义
 - [社区贡献](CONTRIBUTING.zh.md) — 开发环境、测试、PR 提交与评审
