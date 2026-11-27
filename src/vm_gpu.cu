@@ -155,6 +155,10 @@ __device__ __forceinline__ float BF16ToF32(uint16_t v) {
 
 __device__ __forceinline__ uint16_t F32ToBF16(float v) {
   uint32_t u = __float_as_uint(v);
+  // Rounding a NaN payload as an integer can carry into the sign bit or truncate it to infinity.
+  if ((u & 0x7fffffffu) > 0x7f800000u) {
+    return 0x7fc0u;
+  }
   uint32_t lsb = (u >> 16) & 1u;
   u += 0x7fffu + lsb;
   return static_cast<uint16_t>(u >> 16);
@@ -271,6 +275,9 @@ struct LogOp {
 struct ExpOp {
   __device__ __forceinline__ float operator()(float a) const { return expf(a); }
 };
+struct TanhOp {
+  __device__ __forceinline__ float operator()(float a) const { return tanhf(a); }
+};
 struct RoundOp {
   __device__ __forceinline__ float operator()(float a) const { return nearbyintf(a); }
 };
@@ -346,6 +353,27 @@ __device__ __forceinline__ bool CompareValue(T a, T b, int type) {
       return a <= b;
     default:
       return false;
+  }
+}
+
+__device__ __forceinline__ void FmaOp(VmCtx &ctx, const vFma &op) {
+  float *dst = UBPtr<float>(ctx, NarrowU32(op.xd));
+  const float *lhs = UBCPtr<float>(ctx, NarrowU32(op.xn));
+  const float *rhs = UBCPtr<float>(ctx, NarrowU32(op.xm));
+  const auto count = NarrowU32(op.count);
+  const auto fma = [negate = op.negate_product](float a, float b, float c) {
+    return __fmaf_rn(negate ? -a : a, b, c);
+  };
+  if (op.mode == vFma::kTensors) {
+    const float *addend = UBCPtr<float>(ctx, op.operand);
+    ParallelFor(count, [&](uint32_t i) { dst[i] = fma(lhs[i], rhs[i], addend[i]); });
+  } else {
+    const float scalar = __uint_as_float(op.operand);
+    if (op.mode == vFma::kScalarAddend) {
+      ParallelFor(count, [&](uint32_t i) { dst[i] = fma(lhs[i], rhs[i], scalar); });
+    } else {
+      ParallelFor(count, [&](uint32_t i) { dst[i] = fma(lhs[i], scalar, rhs[i]); });
+    }
   }
 }
 
@@ -1554,6 +1582,18 @@ __device__ __forceinline__ void RunOp(VmCtx &ctx, uint64_t *pc, uint64_t head, u
     case F_POINTWISE:
       PointwiseOp(pc, head, tile_idx);
       break;
+    case F_FMA: {
+      vFma op;
+      vFma::Decode(pc, head, op);
+      FmaOp(ctx, op);
+      break;
+    }
+    case F_TANH: {
+      vUnary op;
+      vUnary::Decode(pc, head, op);
+      UnaryOp<F32Tag>(ctx, NarrowU32(op.xd), NarrowU32(op.xn), NarrowU32(op.count), TanhOp{});
+      break;
+    }
     default:
       TrapUnsupported(id, head, pc);
       break;

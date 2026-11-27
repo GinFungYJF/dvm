@@ -18,6 +18,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <sstream>
+#include <stdexcept>
 
 namespace dvm_torch {
 namespace {
@@ -85,8 +86,8 @@ void SetFlags(const Flags &f) { MutableFlags() = f; }
 void ReloadFlagsFromEnv() {
   Flags f;
   const char *text = std::getenv("TORCH_DVM_FUSION");
-  if (text != nullptr) {
-    ParseFlags(text, &f);
+  if (text != nullptr && !ParseFlags(text, &f)) {
+    throw std::invalid_argument("unrecognized fusion option");
   }
   MutableFlags() = f;
 }
@@ -120,8 +121,6 @@ bool ParseFlags(const std::string &text, Flags *out) {
         f.mode = FusionMode::kOff;
       } else if (token == "dump_as_text") {
         f.dump_as_text = true;
-      } else if (token == "compile=fast") {
-        f.compile_fast = true;
       } else if (token.rfind("level=", 0) == 0) {
         std::string v = token.substr(6);
         f.level = (v == "O1" || v == "1") ? 1 : 2;
@@ -142,8 +141,6 @@ bool ParseFlags(const std::string &text, Flags *out) {
       f.dump_dir = value;
     } else if (key == "dump_as_text") {
       f.dump_as_text = IsTrue(value);
-    } else if (key == "compile") {
-      f.compile_fast = value == "fast";
     } else if (key == "mode") {
       if (value == "override" || value == "cpp") {
         f.mode = FusionMode::kOverride;

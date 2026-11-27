@@ -226,6 +226,8 @@ enum vSimdInsnID {
   V_COPY_CUBE_TILE,  // [c310]
   V_AXPY,  // [c310]
   V_GPU_POINTWISE,   // [gpu]
+  V_GPU_FMA,         // [gpu]
+  V_GPU_TANH,        // [gpu]
   V_NONE,
 };
 
@@ -546,6 +548,26 @@ struct vAxpy {
     pc[0] = vMakeSimdHead(id, op.xn, 3);
     pc[1] = op.count << 48 | op.xd << 18 | op.xm;
     pc[2] = op.scalar;
+    return 3;
+  }
+};
+
+struct vFma : vBinary {
+  enum Mode : uint32_t { kTensors, kScalarAddend, kScalarFactor };
+  uint32_t operand;  // third buffer offset or FP32 immediate bits
+  Mode mode;
+  bool negate_product;
+  // pc[0..1] use the vBinary layout, with mode in bits 36..37 and the product sign in bit 38 of pc[1].
+  __aicore_inline__ void Decode(bcodeptr_t pc, uint64_t head, vFma &op) {
+    vBinary::Decode(pc, head, op);
+    op.mode = static_cast<Mode>((pc[1] >> 36) & 3);
+    op.negate_product = (pc[1] >> 38) & 1;
+    op.operand = static_cast<uint32_t>(pc[2]);
+  }
+  __aicore_inline__ uint64_t Encode(bcodeptr_t pc, uint64_t id, const vFma &op) {
+    pc[0] = vMakeSimdHead(id, op.xn, 3);
+    pc[1] = op.count << 48 | uint64_t(op.negate_product) << 38 | uint64_t(op.mode) << 36 | op.xd << 18 | op.xm;
+    pc[2] = op.operand;
     return 3;
   }
 };

@@ -609,6 +609,27 @@ void DumpAxpy(const DumpInfo &dump_info, std::ostringstream &oss) {
       << ", " << reinterpret_cast<void *>(op.xm) << ", " << vAxpy::GetScalar(dump_info.insn);
 }
 
+#ifdef DVM_ARCH_GPU
+void DumpFma(const DumpInfo &info, std::ostringstream &oss) {
+  vFma op;
+  vFma::Decode(info.insn, *info.insn, op);
+  oss << op.count << " " << reinterpret_cast<void *>(op.xd) << ", ";
+  if (op.negate_product) oss << "-";
+  oss << reinterpret_cast<void *>(op.xn) << ", ";
+  if (op.mode == vFma::kScalarFactor) {
+    DumpScalarCode(oss, op.operand, kFloat32);
+    oss << ", " << reinterpret_cast<void *>(op.xm);
+  } else {
+    oss << reinterpret_cast<void *>(op.xm) << ", ";
+    if (op.mode == vFma::kScalarAddend) {
+      DumpScalarCode(oss, op.operand, kFloat32);
+    } else {
+      oss << reinterpret_cast<void *>(static_cast<uintptr_t>(op.operand));
+    }
+  }
+}
+#endif
+
 void DumpBinaryWS(const DumpInfo &dump_info, std::ostringstream &oss) {
   vBinaryWS op;
   vBinaryWS::Decode(dump_info.insn, *dump_info.insn, op);
@@ -1052,6 +1073,8 @@ std::unordered_map<uint64_t, std::tuple<DumpFunc *, std::string, std::string>> o
   {V_CUSTOM, {&DumpCustom, "Custom", "x"}},
 #ifdef DVM_ARCH_GPU
   {V_GPU_POINTWISE, {&DumpPointwise, "Pointwise", "fp32"}},
+  {V_GPU_FMA, {&DumpFma, "Fma", "fp32"}},
+  {V_GPU_TANH, {&DumpUnary, "Tanh", "fp32"}},
 #endif
 };
 

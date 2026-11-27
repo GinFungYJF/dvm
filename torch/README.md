@@ -70,8 +70,13 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 Fusible operators with handwritten unboxed wrappers:
 
 `add` `sub` `mul` `div` `maximum` `minimum` `pow(Tensor,Scalar)` `neg` `relu`
-`sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `clamp` `round` `floor`
-`ceil` `trunc` `sum` `mean` `native_dropout_backward`, plus `add_` `sub_` `mul_` `div_` `relu_`.
+`sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `tanh` `clamp` `round` `floor`
+`ceil` `trunc` `sum` `mean` `native_dropout_backward` `tanh_backward`, plus `add_` `sub_` `mul_` `div_` `relu_`.
+
+Floating-point `add`, `sub`, `add_`, and `sub_` support non-unit `alpha`.
+The GPU VM uses an FP32 fused multiply-add for tensor and scalar operands, including broadcast inputs,
+and rounds the result to the output dtype (FP32, FP16, or BF16). Tensor–tensor `add` and `add_`
+join a graph when either input has a pending producer.
 
 Other ATen operators use a generic guard: **flush first, then forward to the original
 kernel captured before registration**.
@@ -91,8 +96,13 @@ Known limitations:
   including when they would otherwise start a chain with later operators.
 - `sum.out`, `mean.out`, and other reductions such as `amax` / `amin` execute after
   the generic guard flushes the pending graph.
-- `tanh` / `sigmoid` are synthesized from `exp`. `tanh` fusion is disabled by default
-  and can be enabled with `compile_fast=True`.
+- Functional `tanh` joins a pending graph when that graph produces its nonempty, contiguous FP32 input.
+  The GPU VM uses CUDA `tanhf`. Standalone calls, other dtypes, and the `out=` and in-place variants
+  use native PyTorch. The VM implements `sigmoid` using `exp`.
+- `tanh_backward` joins fusion by default when the pending graph produces its upstream gradient.
+  The gradient and saved tanh output must be nonempty, contiguous FP32 tensors of the same shape on the same GPU.
+  The GPU VM evaluates `fma(-y, y, 1.0)` on the saved output and then multiplies by the upstream gradient.
+  Standalone calls and the `out=` variant use native PyTorch.
 
 ## Performance
 

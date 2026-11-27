@@ -127,7 +127,9 @@ namespace dvm::gpu {
   X(F_RSUM_X, V_RSUM_X) \
   X(F_RSUM_Y, V_RSUM_Y) \
   X(F_ATOMICCUM, V_ATOMICCUM) \
-  X(F_POINTWISE, V_GPU_POINTWISE)
+  X(F_POINTWISE, V_GPU_POINTWISE) \
+  X(F_FMA, V_GPU_FMA) \
+  X(F_TANH, V_GPU_TANH)
 
 enum GpuVmOpId : uint8_t {
 #define GPU_VM_ENUM_ENTRY(gpu, host) gpu,

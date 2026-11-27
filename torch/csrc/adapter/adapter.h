@@ -30,7 +30,6 @@ struct Caps {
   bool has_async_queue = false;
   int vector_align = 32;
   int prefetch_depth = 0;
-  bool strict_accuracy = true;
 };
 
 /**

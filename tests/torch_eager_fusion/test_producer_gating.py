@@ -239,20 +239,19 @@ def test_add_inplace_pending_read_view_still_flushes():
 
 
 @CUDA
-@pytest.mark.parametrize("fallback", ["dtype", "stride", "alpha"])
+@pytest.mark.parametrize("fallback", ["dtype", "stride"])
 def test_add_inplace_materializes_read_operand_when_emission_is_rejected(fallback):
     target = torch.randn(8, 34 if fallback == "stride" else 17, device="cuda")
     if fallback == "stride":
         target = target[:, ::2]
     source = torch.randn(8, 17, device="cuda",
                          dtype=torch.float16 if fallback == "dtype" else torch.float32)
-    alpha = 2 if fallback == "alpha" else 1
     with eager():
-        expected = target.clone().add_(source * 2, alpha=alpha)
+        expected = target.clone().add_(source * 2)
     with fused():
         torch_dvm.reset_stats()
         rhs = source * 2
-        target.add_(rhs, alpha=alpha)
+        target.add_(rhs)
     assert torch_dvm.stats()["graph_sizes"] == {1: 1}
     torch.testing.assert_close(target, expected, rtol=0, atol=0)
 

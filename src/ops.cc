@@ -42,7 +42,8 @@ static const InsnIdTable unary_id_list[kUnaryTypeEnd] = {
   {"Round", {V_NONE, V_NONE, V_NONE, V_ROUND, V_NONE, V_NONE}},
   {"Floor", {V_NONE, V_NONE, V_NONE, V_FLOOR, V_NONE, V_NONE}},
   {"Ceil", {V_NONE, V_NONE, V_NONE, V_CEIL, V_NONE, V_NONE}},
-  {"Trunc", {V_NONE, V_NONE, V_NONE, V_TRUNC, V_NONE, V_NONE}}};
+  {"Trunc", {V_NONE, V_NONE, V_NONE, V_TRUNC, V_NONE, V_NONE}},
+  {"Tanh", {V_NONE, V_NONE, V_NONE, V_GPU_TANH, V_NONE, V_NONE}}};
 
 static const InsnIdTable binary_id_list[] = {
   // must keep consistent order with BinaryType
@@ -534,6 +535,8 @@ static constexpr ObjectMeta GenObjectMeta() {
     {kGenExtOut, F_NS, nullptr, nullptr, nullptr, nullptr},                                                   // ExtOut
     {kGenSimd0, 0, nullptr, nullptr, nullptr, CubeOp::ShapeProp},                                             // CubeOp
     {kGenSimd0, 0, nullptr, nullptr, nullptr, GmmOp::ShapeProp},                                              // GmmOp
+    {kGenSimd2, F_IP | F_NS | F_LR | F_RR, nullptr, nullptr, nullptr, nullptr},  // scalar FMA
+    {kGenSimd3, F_IP | F_NS | F_LR | F_RR, nullptr, nullptr, nullptr, nullptr},  // tensor FMA
   };
 
   ObjectMeta meta;
@@ -2463,6 +2466,64 @@ void _BinaryNormalizer::Normalize(NDObject *self, std::vector<NDObject *> &run_o
     self->rhs_ = insert_stuff(self->rhs_, rhs_stuff_);
   }
   self->nd_ = self->lhs_->nd_;
+}
+
+FmaOp::FmaOp(NDObject *lhs, NDObject *rhs, NDObject *addend, scode_t scalar, vFma::Mode mode, ProductSign sign)
+    : FlexOp(lhs, rhs, kFloat32, mode == vFma::kTensors ? kFmaTensorOp : kFmaScalarOp),
+      scalar_(scalar), mode_(mode), sign_(sign) {
+  shape_ref_ = lhs->shape_ref_;
+  if (mode == vFma::kTensors) {
+    addend_.data_ext[0] = addend;
+    SetXhs(&addend_);
+  }
+}
+
+void FmaOp::CheckShapes(const NDObject *lhs, const NDObject *rhs, const NDObject *addend) {
+  auto same_shape = [lhs](const NDObject *other) {
+    return lhs->nd_.data == other->nd_.data || lhs->nd_.dims() == other->nd_.dims();
+  };
+  EXCEPTION_IF(!same_shape(rhs) || (addend && !same_shape(addend)),
+               "Fma tensor operands must have the same shape");
+}
+
+void FmaOp::Normalize(std::vector<NDObject *> &run_ops) {
+  CheckShapes(lhs_, rhs_, xhs_ ? xhs_->data[0] : nullptr);
+  nd_ = lhs_->nd_;
+}
+
+uint64_t FmaOp::Emit(VectorKernel &k) {
+  vFma op;
+  op.xd = xbuf_;
+  op.xn = lhs_->xbuf_;
+  op.xm = rhs_->xbuf_;
+  op.count = nd_.stride_back();
+  op.operand = xhs_ ? static_cast<uint32_t>(xhs_->data[0]->xbuf_) : scalar_;
+  op.mode = mode_;
+  op.negate_product = sign_ == ProductSign::kNegative;
+  return vFma::Encode(insn_, V_GPU_FMA, op);
+}
+
+NDObject *FmaOp::Clone(CloneHelper &h) {
+  auto *addend = xhs_ ? h.GetClone(xhs_->data[0]) : nullptr;
+  return new FmaOp(h.GetClone(lhs_), h.GetClone(rhs_), addend, scalar_, mode_, sign_);
+}
+
+void FmaOp::Dump(bool verbose, std::ostringstream &oss) {
+  oss << "Fma";
+  if (!verbose) return;
+  oss << (sign_ == ProductSign::kNegative ? "<-a*" : "<a*");
+  if (mode_ == vFma::kScalarFactor) {
+    DumpScalarCode(oss, scalar_, kFloat32);
+    oss << "+c>";
+  } else {
+    oss << "b+";
+    if (mode_ == vFma::kScalarAddend) {
+      DumpScalarCode(oss, scalar_, kFloat32);
+    } else {
+      oss << "c";
+    }
+    oss << ">";
+  }
 }
 
 uint64_t BinaryOp::Emit(VectorKernel &k) {

@@ -1244,6 +1244,10 @@ NDObject *Kernel::MultiLoad(void *addr, IntArrayRef *shape, DataType type, const
 
 template <UnaryType op_type>
 NDObject *Kernel::Unary(NDObject *input) {
+  if constexpr (op_type == UnaryType::kTanh) {
+    EXCEPTION_IF(g_system.Arch() != kAiCore_Gpu || !input || input->type_id_ != kFloat32,
+                 "Tanh requires a GPU FP32 operand");
+  }
   switch (input->type_id_) {
     case kBool:
       if (g_system.Arch() != kAiCore_C310) {
@@ -1294,6 +1298,7 @@ DEF_UNARY(UnaryType::kRound);
 DEF_UNARY(UnaryType::kFloor);
 DEF_UNARY(UnaryType::kCeil);
 DEF_UNARY(UnaryType::kTrunc);
+DEF_UNARY(UnaryType::kTanh);
 
 template <BinaryType op_type, typename L, typename R>
 NDObject *Kernel::Binary(L lhs, R rhs) {
@@ -1427,6 +1432,32 @@ NDObject *Kernel::Axpy(NDObject *self, NDObject *other, T alpha) {
 }
 
 template NDObject *Kernel::Axpy<float>(NDObject *, NDObject *, float);
+
+static NDObject *AppendFma(VKernel *kernel, NDObject *lhs, NDObject *rhs, NDObject *addend, scode_t scalar,
+                           vFma::Mode mode, ProductSign sign) {
+  EXCEPTION_IF(g_system.Arch() != kAiCore_Gpu, "Fma requires the GPU backend");
+  EXCEPTION_IF(!lhs || !rhs || (mode == vFma::kTensors && !addend), "Fma requires tensor operands");
+  EXCEPTION_IF(lhs->type_id_ != kFloat32 || rhs->type_id_ != kFloat32 || (addend && addend->type_id_ != kFloat32),
+               "Fma requires FP32 operands");
+  if (kernel->KType() == kEager) {
+    FmaOp::CheckShapes(lhs, rhs, addend);
+  }
+  auto *result = new FmaOp(lhs, rhs, addend, scalar, mode, sign);
+  kernel->Append(result);
+  return result;
+}
+
+NDObject *Kernel::Fma(NDObject *a, NDObject *b, NDObject *c, ProductSign sign) {
+  return AppendFma(kernel_, a, b, c, 0, vFma::kTensors, sign);
+}
+
+NDObject *Kernel::Fma(NDObject *a, NDObject *b, float c, ProductSign sign) {
+  return AppendFma(kernel_, a, b, nullptr, EncodeScalar(c), vFma::kScalarAddend, sign);
+}
+
+NDObject *Kernel::Fma(NDObject *a, float b, NDObject *c, ProductSign sign) {
+  return AppendFma(kernel_, a, c, nullptr, EncodeScalar(b), vFma::kScalarFactor, sign);
+}
 
 NDObject *Kernel::Select(NDObject *cond, NDObject *lhs, NDObject *rhs) {
   if (lhs->type_id_ == kInt64) {

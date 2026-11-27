@@ -59,6 +59,7 @@ EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scala
 EmitResult EmitExpandedDiv(EmitCtx &ctx, const at::Tensor &input, const at::Scalar &divisor);
 EmitResult EmitDropoutBackward(EmitCtx &ctx, const at::Tensor &grad, const at::Tensor &mask,
                                double scale);
+EmitResult EmitTanhBackward(EmitCtx &ctx, const at::Tensor &grad, const at::Tensor &output);
 EmitResult EmitEq(EmitCtx &ctx, const at::Tensor &a, const at::Tensor &b);
 EmitResult EmitEqScalar(EmitCtx &ctx, const at::Tensor &a, const at::Scalar &b);
 EmitResult EmitMaskedFill(EmitCtx &ctx, const at::Tensor &self, const at::Tensor &mask,
@@ -68,7 +69,6 @@ EmitResult EmitNeg(EmitCtx &ctx, const at::Tensor &a);
 EmitResult EmitRelu(EmitCtx &ctx, const at::Tensor &a);
 EmitResult EmitRsqrt(EmitCtx &ctx, const at::Tensor &a);
 EmitResult EmitSigmoid(EmitCtx &ctx, const at::Tensor &a);
-EmitResult EmitTanh(EmitCtx &ctx, const at::Tensor &a);
 EmitResult EmitPowScalar(EmitCtx &ctx, const at::Tensor &a, double exponent);
 EmitResult EmitClamp(EmitCtx &ctx, const at::Tensor &a, const std::optional<c10::Scalar> &min,
                      const std::optional<c10::Scalar> &max);

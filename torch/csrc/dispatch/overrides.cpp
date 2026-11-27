@@ -17,6 +17,7 @@
 
 #include <ATen/core/boxing/KernelFunction.h>
 #include <ATen/core/dispatch/Dispatcher.h>
+#include <ATen/ops/result_type.h>
 #include <c10/util/Exception.h>
 
 #include <optional>
@@ -120,6 +121,12 @@ bool FusionActive() {
   return f.enabled && f.mode != FusionMode::kOff;
 }
 
+// Two scalar tensors can promote even when only one is on CUDA.
+bool ScalarPromotesAddSub(dvm::BinaryType op, const at::Tensor &device, const at::Tensor &scalar) {
+  return (op == dvm::kAdd || op == dvm::kSub) && device.dim() == 0 && device.scalar_type() != scalar.scalar_type() &&
+         at::result_type(device, scalar) != device.scalar_type();
+}
+
 /**
  * Shared prologue. Resolve execution and alias boundaries before emission;
  * emitters check tensor eligibility before constructing any graph nodes.
@@ -212,7 +219,7 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
   // A Python scalar reaches the dispatcher as a 0-dim CPU tensor. It cannot be
   // loaded from device memory, but it folds into an immediate operand.
   if (IsWrappedScalar(b)) {
-    if (!Prepare(key, {a}, &k)) {
+    if (!Prepare(key, {a}, &k) || ScalarPromotesAddSub(op, a, b)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
@@ -222,7 +229,7 @@ EmitResult DispatchBinary(const OpKey &key, dvm::BinaryType op, const at::Tensor
     return EmitBinaryScalar(ctx, op, a, b.item(), alpha);
   }
   if (IsWrappedScalar(a)) {
-    if (!Prepare(key, {b}, &k)) {
+    if (!Prepare(key, {b}, &k) || ScalarPromotesAddSub(op, b, a)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
@@ -245,7 +252,7 @@ EmitResult DispatchBinaryInplace(const OpKey &key, dvm::BinaryType op, at::Tenso
   GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
   GraphKernel *k = nullptr;
   if (IsWrappedScalar(other)) {
-    if (!Prepare(key, {self}, &k, 1)) {
+    if (!Prepare(key, {self}, &k, 1) || ScalarPromotesAddSub(op, self, other)) {
       return std::nullopt;
     }
     EmitCtx ctx{k, key.name.c_str()};
@@ -294,6 +301,16 @@ EmitResult DispatchExpandedDiv(const OpKey &key, const at::Tensor &input, const 
   }
   EmitCtx ctx{k, key.name.c_str()};
   return EmitExpandedDiv(ctx, input, divisor);
+}
+
+EmitResult DispatchTanhBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &output) {
+  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
+  GraphKernel *k = nullptr;
+  if (!Prepare(key, {grad, output}, &k) || !k->HasPendingProducer(grad)) {
+    return std::nullopt;
+  }
+  EmitCtx ctx{k, key.name.c_str()};
+  return EmitTanhBackward(ctx, grad, output);
 }
 
 EmitResult DispatchDropoutBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &mask,
@@ -350,6 +367,9 @@ EmitResult DispatchUnary(const OpKey &key, dvm::UnaryType op, const at::Tensor &
   if (!Prepare(key, {a}, &k)) {
     return std::nullopt;
   }
+  if (op == dvm::kTanh && !k->HasPendingProducer(a)) {
+    return std::nullopt;
+  }
   EmitCtx ctx{k, key.name.c_str()};
   return EmitUnary(ctx, op, a);
 }
@@ -392,21 +412,6 @@ EmitResult DispatchSigmoid(const OpKey &key, const at::Tensor &a) {
   }
   EmitCtx ctx{k, key.name.c_str()};
   return EmitSigmoid(ctx, a);
-}
-
-EmitResult DispatchTanh(const OpKey &key, const at::Tensor &a) {
-  GraphManager::ScopedLock guard = GraphManager::Instance().Lock();
-  GraphKernel *k = nullptr;
-  if (!Prepare(key, {a}, &k)) {
-    return std::nullopt;
-  }
-  // tanh is synthesised from exp, so it is not bit-exact against ATen, and the
-  // GPU VM has no tanh instruction. Off unless the backend accepts a tolerance.
-  if (GetAdapter().Capabilities().strict_accuracy && !GetFlags().compile_fast) {
-    return std::nullopt;
-  }
-  EmitCtx ctx{k, key.name.c_str()};
-  return EmitTanh(ctx, a);
 }
 
 EmitResult DispatchPowScalar(const OpKey &key, const at::Tensor &a, double exponent) {
@@ -579,6 +584,15 @@ at::Tensor WrapDivScalar(const at::Tensor &a, const at::Scalar &b) {
   return CallOriginal<at::Tensor>(kKey, a, b);
 }
 
+at::Tensor WrapTanhBackward(const at::Tensor &grad, const at::Tensor &output) {
+  static const OpKey kKey{"aten::tanh_backward", ""};
+  if (auto out = DispatchTanhBackward(kKey, grad, output); out.has_value()) {
+    return *out;
+  }
+  FlushForFallback(FlushReason::kNonFusibleOp);
+  return CallOriginal<at::Tensor>(kKey, grad, output);
+}
+
 at::Tensor WrapDropoutBackward(const at::Tensor &grad, const at::Tensor &mask, double scale) {
   static const OpKey kKey{"aten::native_dropout_backward", ""};
   if (auto out = DispatchDropoutBackward(kKey, grad, mask, scale); out.has_value()) {
@@ -651,15 +665,6 @@ at::Tensor WrapSigmoid(const at::Tensor &a) {
   return CallOriginal<at::Tensor>(kKey, a);
 }
 
-at::Tensor WrapTanh(const at::Tensor &a) {
-  static const OpKey kKey{"aten::tanh", ""};
-  if (auto out = DispatchTanh(kKey, a); out.has_value()) {
-    return *out;
-  }
-  FlushForFallback(FlushReason::kNonFusibleOp);
-  return CallOriginal<at::Tensor>(kKey, a);
-}
-
 at::Tensor WrapClamp(const at::Tensor &a, const std::optional<at::Scalar> &min,
                      const std::optional<at::Scalar> &max) {
   static const OpKey kKey{"aten::clamp", ""};
@@ -683,6 +688,7 @@ at::Tensor WrapClamp(const at::Tensor &a, const std::optional<at::Scalar> &min,
 DVM_TORCH_WRAP_UNARY(WrapSqrt, "aten::sqrt", dvm::kSqrt)
 DVM_TORCH_WRAP_UNARY(WrapAbs, "aten::abs", dvm::kAbs)
 DVM_TORCH_WRAP_UNARY(WrapExp, "aten::exp", dvm::kExp)
+DVM_TORCH_WRAP_UNARY(WrapTanh, "aten::tanh", dvm::kTanh)
 DVM_TORCH_WRAP_UNARY(WrapLog, "aten::log", dvm::kLog)
 DVM_TORCH_WRAP_UNARY(WrapReciprocal, "aten::reciprocal", dvm::kReciprocal)
 DVM_TORCH_WRAP_UNARY(WrapRound, "aten::round", dvm::kRound)
@@ -878,6 +884,7 @@ void InstallFusibleWrappers() {
   RegisterWrapper(OpKey{"aten::rsqrt", ""}, &WrapRsqrt);
   RegisterWrapper(OpKey{"aten::sigmoid", ""}, &WrapSigmoid);
   RegisterWrapper(OpKey{"aten::tanh", ""}, &WrapTanh);
+  RegisterWrapper(OpKey{"aten::tanh_backward", ""}, &WrapTanhBackward);
   RegisterWrapper(OpKey{"aten::clamp", ""}, &WrapClamp);
   RegisterWrapper(OpKey{"aten::sqrt", ""}, &WrapSqrt);
   RegisterWrapper(OpKey{"aten::abs", ""}, &WrapAbs);

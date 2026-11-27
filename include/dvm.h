@@ -39,6 +39,8 @@ enum GatherMode {
   kSliceGather = 1,
 };
 
+enum class ProductSign { kPositive, kNegative };
+
 enum UnaryType {
   kSqrt = 0,
   kAbs,
@@ -51,6 +53,7 @@ enum UnaryType {
   kFloor,
   kCeil,
   kTrunc,
+  kTanh,  // GPU FP32
   kUnaryTypeEnd,
 };
 
@@ -402,6 +405,14 @@ class DVM_API Kernel {
   NDObject *Select(NDObject *cond, NDObject *lhs, NDObject *rhs);
 
   /**
+   * @brief Emit (signed product of a and b) + c with a single round to nearest, ties to even.
+   * The GPU implementation takes FP32 tensors of the same shape. Either b or c can be an immediate.
+   */
+  NDObject *Fma(NDObject *a, NDObject *b, NDObject *c, ProductSign sign = ProductSign::kPositive);
+  NDObject *Fma(NDObject *a, NDObject *b, float c, ProductSign sign = ProductSign::kPositive);
+  NDObject *Fma(NDObject *a, float b, NDObject *c, ProductSign sign = ProductSign::kPositive);
+
+  /**
    * @brief Emit a cast operation.
    * @param input input operation to cast.
    * @param dtype target data type.
@@ -683,6 +694,8 @@ class DVM_API Kernel {
         return Unary<UnaryType::kCeil>(input);
       case UnaryType::kTrunc:
         return Unary<UnaryType::kTrunc>(input);
+      case UnaryType::kTanh:
+        return Unary<UnaryType::kTanh>(input);
       default:
         return nullptr;
     }

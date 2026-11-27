@@ -40,9 +40,7 @@ def test_neg_preserves_special_values_and_zero_sign(dtype):
 
 
 @CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16,
-    pytest.param(torch.bfloat16, marks=pytest.mark.xfail(
-        strict=True, reason="Existing GPU VM BF16 neg(NaN) produces -0, also before the emit rewrite"))])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_neg_preserves_nan(dtype):
     x = torch.tensor([float("nan")], device="cuda", dtype=dtype)
     with eager():

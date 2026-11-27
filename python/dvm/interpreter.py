@@ -454,7 +454,7 @@ def parse_and_generate_code(block, idx, occurrence_count):
             code_lines.append('    ' + line)
             numpy_expr = f"np.divide({scalar_value}, {param_numpy_expr})"
             numpy_steps[var_name] = numpy_expr
-        elif operation in ['Abs', 'Exp', 'Log', 'Sqrt', 'Reciprocal', 'IsFinite', 'LogicalNot']:
+        elif operation in ['Abs', 'Exp', 'Tanh', 'Log', 'Sqrt', 'Reciprocal', 'IsFinite', 'LogicalNot']:
             operator_count += 1  # 增加算子计数
             if len(params_list) < 1:
                 print(f"{operation} operation缺少参数: {line}")
@@ -469,6 +469,7 @@ def parse_and_generate_code(block, idx, occurrence_count):
                 numpy_op_map = {
                     'Abs': ('abs', 'np.abs'),
                     'Exp': ('exp', 'np.exp'),
+                    'Tanh': ('tanh', 'np.tanh'),
                     'Log': ('log', 'np.log'),
                     'Sqrt': ('sqrt', 'np.sqrt'),
                     'Reciprocal': ('reciprocal', 'np.reciprocal'),

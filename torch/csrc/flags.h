@@ -32,7 +32,6 @@ struct Flags {
   bool enabled = false;
   FusionMode mode = FusionMode::kOff;
   int level = 2;      ///< 1 = conservative op set, 2 = full op set.
-  bool compile_fast = false;
   bool dump_as_text = false;
   std::string dump_dir = "./dvm_dump";
   bool guards = true; ///< Register a flush guard on every CUDA op.

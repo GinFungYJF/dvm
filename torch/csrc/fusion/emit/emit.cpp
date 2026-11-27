@@ -17,6 +17,7 @@
 
 #include <ATen/ExpandUtils.h>
 #include <ATen/Context.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/WrapDimUtilsMulti.h>
 
 #include <cmath>
@@ -24,7 +25,6 @@
 #include <utility>
 
 #include "adapter/adapter.h"
-#include "flags.h"
 
 namespace dvm_torch {
 namespace {
@@ -84,85 +84,93 @@ dvm::NDObject *DivideByScalar(dvm::Kernel &kernel, dvm::NDObject *input,
  */
 bool ScalarTypeIsFusable(const at::Tensor &t) { return IsFloatDtype(t); }
 
-std::optional<double> BinaryAlpha(dvm::BinaryType op, at::ScalarType dtype,
+bool IsAddSub(dvm::BinaryType op) { return op == dvm::kAdd || op == dvm::kSub; }
+
+double UnitAlphaFactor(dvm::BinaryType op) { return op == dvm::kAdd ? 1.0 : -1.0; }
+
+bool EligibleBinary(dvm::BinaryType op, const at::Tensor &t) {
+  return Eligible(t) && (!IsAddSub(op) || (t.numel() != 0 && !t.is_neg() && !t.is_conj()));
+}
+
+float FloatOperand(const at::Scalar &value) {
+  // TensorIterator converts floating CPU operands to the CUDA opmath dtype, including overflow to infinity.
+  return value.isFloatingPoint() ? static_cast<float>(value.toDouble()) : value.toFloat();
+}
+
+std::optional<double> BinaryAlpha(dvm::BinaryType op, const at::Tensor &input,
                                   const at::Scalar &alpha) {
-  if (op != dvm::kAdd && op != dvm::kSub) {
+  if (!IsAddSub(op)) {
     return 1.0;
   }
   // Let the captured native kernel report invalid alpha types and overflow.
-  if (alpha.isBoolean() || alpha.isComplex()) {
+  const bool integral = input.scalar_type() == at::kInt;
+  if (alpha.isBoolean() || alpha.isComplex() || (integral && !alpha.isIntegral(false))) {
     return std::nullopt;
   }
-  if (dtype == at::kInt) {
-    if (!alpha.isIntegral(false)) {
-      return std::nullopt;
-    }
-    const auto value = alpha.to<int64_t>();
-    // Native sub validates the negated alpha when lowering to add.
-    const int64_t low = op == dvm::kSub ? -int64_t{std::numeric_limits<int32_t>::max()}
-                                      : std::numeric_limits<int32_t>::min();
-    const int64_t high = op == dvm::kSub ? -int64_t{std::numeric_limits<int32_t>::min()}
-                                       : std::numeric_limits<int32_t>::max();
-    if (value < low || value > high) {
-      return std::nullopt;
-    }
-    return static_cast<double>(value);
+  const double value = alpha.toDouble();
+  if (value == 1.0) {
+    return UnitAlphaFactor(op);
   }
-  const double value = alpha.to<double>();
+  // ATen implements sub with -alpha in the original Scalar type. Negating after
+  // the FP32 conversion would give integer zero the wrong sign.
+  const auto factor = op == dvm::kSub ? -alpha : alpha;
+  if (integral) {
+    const double signed_value = factor.toDouble();
+    if (signed_value < std::numeric_limits<int32_t>::min() || signed_value > std::numeric_limits<int32_t>::max()) {
+      return std::nullopt;
+    }
+    return signed_value;
+  }
   if (std::isfinite(value) && std::abs(value) > std::numeric_limits<float>::max()) {
     return std::nullopt;
   }
-  const float scale = static_cast<float>(value);
-  // CUDA add/sub use FMA. Separate Mul and Add can round or overflow differently,
-  // so non-unit floating scales require the existing relaxed accuracy mode.
-  if (scale != 1.0f && GetAdapter().Capabilities().strict_accuracy && !GetFlags().compile_fast) {
+  const float scale = factor.toFloat();
+  // The eager graph launches on the current device's stream.
+  if (scale != UnitAlphaFactor(op) &&
+      input.get_device() != at::globalContext().getAcceleratorHooksInterface(at::kCUDA).getCurrentDevice()) {
     return std::nullopt;
   }
   return scale;
 }
 
-dvm::NDObject *CastAddSubResult(dvm::Kernel &kernel, dvm::NDObject *result, dvm::DType dtype) {
-  if (dtype == dvm::kBFloat16 && dvm::Kernel::GetDType(result) == dvm::kFloat32) {
-    // The VM's BF16 rounding can turn some FP32 NaN payloads into zero/Inf.
-    // Canonicalise NaNs before narrowing the newly introduced FP32 arithmetic.
-    auto *is_nan = kernel.Binary<dvm::kNotEqual>(result, result);
-    auto *nan = kernel.Broadcast(std::numeric_limits<float>::quiet_NaN(),
-                                 dvm::Kernel::GetShape(result), dvm::kFloat32);
-    result = kernel.Select(is_nan, nan, result);
+dvm::NDObject *FmaOperand(GraphKernel &graph, dvm::NDObject *input, const std::vector<int64_t> &shape) {
+  auto *value = graph.GetKernel().Cast(input, dvm::kFloat32);
+  const auto *dims = dvm::Kernel::GetShape(value);
+  if (at::IntArrayRef(dims->data, dims->size) != at::IntArrayRef(shape)) {
+    value = graph.Broadcast(value, shape);
   }
+  return value;
+}
+
+dvm::NDObject *ScaledAddSub(GraphKernel &graph, dvm::BinaryType op, dvm::NDObject *left, dvm::NDObject *right,
+                            double factor, dvm::DType dtype, const std::vector<int64_t> &shape) {
+  auto &kernel = graph.GetKernel();
+  if (factor == UnitAlphaFactor(op)) {
+    auto *result = op == dvm::kAdd ? kernel.Binary<dvm::kAdd>(left, right) : kernel.Binary<dvm::kSub>(left, right);
+    return kernel.Cast(result, dtype);
+  }
+  if (dtype == dvm::kInt32) {
+    right = kernel.Binary<dvm::kMul>(right, static_cast<int32_t>(factor));
+    return kernel.Binary<dvm::kAdd>(left, right);
+  }
+  left = FmaOperand(graph, left, shape);
+  right = FmaOperand(graph, right, shape);
+  auto *result = kernel.Fma(right, static_cast<float>(factor), left);
   return kernel.Cast(result, dtype);
 }
 
-dvm::NDObject *ScaledAddSub(dvm::Kernel &kernel, dvm::BinaryType op, dvm::NDObject *left,
-                            dvm::NDObject *right, double alpha, dvm::DType dtype) {
-  if (alpha != 1.0) {
-    if (dtype == dvm::kInt32) {
-      const auto scale = static_cast<int32_t>(op == dvm::kSub ? -alpha : alpha);
-      right = kernel.Binary<dvm::kMul>(right, scale);
-      return kernel.Binary<dvm::kAdd>(left, right);
-    } else {
-      // Keep the product in FP32 until the add/sub result is rounded back.
-      left = kernel.Cast(left, dvm::kFloat32);
-      right = kernel.Cast(right, dvm::kFloat32);
-      right = kernel.Binary<dvm::kMul>(right, static_cast<float>(alpha));
-    }
-  }
-  auto *result = op == dvm::kAdd ? kernel.Binary<dvm::kAdd>(left, right)
-                                : kernel.Binary<dvm::kSub>(left, right);
-  return CastAddSubResult(kernel, result, dtype);
-}
-
 dvm::NDObject *ScaledAddSubScalar(dvm::Kernel &kernel, dvm::BinaryType op,
-                                  dvm::NDObject *left, float right, double alpha) {
+                                  dvm::NDObject *left, float right, double factor) {
   const auto dtype = dvm::Kernel::GetDType(left);
-  // Wrapped and direct scalar operands are evaluated in the opmath dtype.
   left = kernel.Cast(left, dvm::kFloat32);
-  if (alpha != 1.0) {
-    right *= static_cast<float>(alpha);
+  if (factor == UnitAlphaFactor(op)) {
+    auto *result = op == dvm::kAdd ? kernel.Binary<dvm::kAdd>(left, right) : kernel.Binary<dvm::kSub>(left, right);
+    return kernel.Cast(result, dtype);
   }
-  auto *result = op == dvm::kAdd ? kernel.Binary<dvm::kAdd>(left, right)
-                                : kernel.Binary<dvm::kSub>(left, right);
-  return CastAddSubResult(kernel, result, dtype);
+  // Keep the two scalar factors separate until FMA rounds the full expression.
+  auto *operand = kernel.Broadcast(right, dvm::Kernel::GetShape(left), dvm::kFloat32);
+  auto *result = kernel.Fma(operand, static_cast<float>(factor), left);
+  return kernel.Cast(result, dtype);
 }
 
 bool EligibleBool(const at::Tensor &t) {
@@ -214,7 +222,7 @@ bool IsIntegerDtype(const at::Tensor &t) { return t.scalar_type() == at::kInt; }
 
 EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
                       const at::Tensor &b, const at::Scalar &alpha) {
-  if (!Eligible(a) || !Eligible(b)) {
+  if (!EligibleBinary(op, a) || !EligibleBinary(op, b) || a.device() != b.device()) {
     return std::nullopt;
   }
   if (a.scalar_type() != b.scalar_type()) {
@@ -229,7 +237,7 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
   if (!out_shape) {
     return std::nullopt;
   }
-  auto scale = BinaryAlpha(op, a.scalar_type(), alpha);
+  auto scale = BinaryAlpha(op, a, alpha);
   if (!scale) {
     return std::nullopt;
   }
@@ -240,7 +248,7 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
     switch (op) {
       case dvm::kAdd:
       case dvm::kSub:
-        return ScaledAddSub(ctx.k->GetKernel(), op, la, lb, *scale, ToDvmDtype(a.scalar_type()));
+        return ScaledAddSub(*ctx.k, op, la, lb, *scale, ToDvmDtype(a.scalar_type()), *out_shape);
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(la, lb);
       case dvm::kDiv: return ctx.k->GetKernel().Binary<dvm::kDiv>(la, lb);
       case dvm::kMaximum: return ctx.k->GetKernel().Binary<dvm::kMaximum>(la, lb);
@@ -268,16 +276,14 @@ EmitResult EmitBinary(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
 
 EmitResult EmitBinaryScalar(EmitCtx &ctx, dvm::BinaryType op, const at::Tensor &a,
                             const at::Scalar &b, const at::Scalar &alpha) {
-  if (!Eligible(a) || !ScalarTypeIsFusable(a) || b.isComplex() || (op == dvm::kSub && b.isBoolean())) {
+  if (!EligibleBinary(op, a) || !ScalarTypeIsFusable(a) || b.isComplex() || (op == dvm::kSub && b.isBoolean())) {
     return std::nullopt;
   }
-  auto scale = BinaryAlpha(op, a.scalar_type(), alpha);
+  auto scale = BinaryAlpha(op, a, alpha);
   if (!scale) {
     return std::nullopt;
   }
-  // A Python scalar does not participate in dtype promotion: `fp16 * 2.0` stays
-  // fp16, so the constant is materialised at the tensor's own dtype.
-  const float constant = b.isFloatingPoint() ? static_cast<float>(b.to<double>()) : b.to<float>();
+  const float constant = FloatOperand(b);
   dvm::NDObject *la = ctx.k->Read(a);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {
@@ -364,23 +370,42 @@ EmitResult EmitDropoutBackward(EmitCtx &ctx, const at::Tensor &grad, const at::T
   return out;
 }
 
-EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
-                               const at::Tensor &b, const at::Scalar &alpha) {
-  if (!Eligible(b) || !ScalarTypeIsFusable(b) || a.isComplex() || (op == dvm::kSub && a.isBoolean())) {
+EmitResult EmitTanhBackward(EmitCtx &ctx, const at::Tensor &grad, const at::Tensor &output) {
+  if (!Eligible(grad) || !Eligible(output) || grad.scalar_type() != at::kFloat || output.scalar_type() != at::kFloat ||
+      grad.numel() == 0 || grad.device() != output.device() || grad.sizes() != output.sizes() ||
+      grad.is_neg() || output.is_neg() || grad.is_conj() || output.is_conj()) {
     return std::nullopt;
   }
-  auto scale = BinaryAlpha(op, b.scalar_type(), alpha);
+  auto &kernel = ctx.k->GetKernel();
+  auto *upstream = ctx.k->Read(grad);
+  auto *saved = ctx.k->Read(output);
+  auto *derivative = kernel.Fma(saved, saved, 1.0f, dvm::ProductSign::kNegative);
+  auto *result = kernel.Binary<dvm::kMul>(upstream, derivative);
+
+  at::Tensor out = AllocateLike(grad.sizes().vec(), at::kFloat, grad);
+  ctx.k->Write(out, result);
+  ctx.k->AppendSignature(ctx.op_name);
+  return out;
+}
+
+EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scalar &a,
+                               const at::Tensor &b, const at::Scalar &alpha) {
+  if (!EligibleBinary(op, b) || !ScalarTypeIsFusable(b) || a.isComplex() || (op == dvm::kSub && a.isBoolean())) {
+    return std::nullopt;
+  }
+  auto scale = BinaryAlpha(op, b, alpha);
   if (!scale) {
     return std::nullopt;
   }
-  const float constant = a.to<float>();
+  const float constant = IsAddSub(op) ? FloatOperand(a) : a.toFloat();
+  const auto out_shape = b.sizes().vec();
   dvm::NDObject *lb = ctx.k->Read(b);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     if (op == dvm::kAdd || op == dvm::kSub) {
       auto &kernel = ctx.k->GetKernel();
       auto *left = kernel.Broadcast(constant, dvm::Kernel::GetShape(lb), dvm::kFloat32);
-      return ScaledAddSub(kernel, op, left, kernel.Cast(lb, dvm::kFloat32), *scale,
-                          ToDvmDtype(b.scalar_type()));
+      return ScaledAddSub(*ctx.k, op, left, kernel.Cast(lb, dvm::kFloat32), *scale,
+                          ToDvmDtype(b.scalar_type()), out_shape);
     }
     switch (op) {
       case dvm::kAdd: return ctx.k->GetKernel().Binary<dvm::kAdd>(constant, lb);
@@ -394,7 +419,6 @@ EmitResult EmitBinaryScalarLhs(EmitCtx &ctx, dvm::BinaryType op, const at::Scala
   if (res == nullptr) {
     return std::nullopt;
   }
-  std::vector<int64_t> out_shape(b.sizes().begin(), b.sizes().end());
   at::Tensor out = AllocateLike(out_shape, b.scalar_type(), b);
   ctx.k->Write(out, res);
   ctx.k->AppendSignature(ctx.op_name);
@@ -480,6 +504,9 @@ EmitResult EmitUnary(EmitCtx &ctx, dvm::UnaryType op, const at::Tensor &a) {
   if (!Eligible(a)) {
     return std::nullopt;
   }
+  if (op == dvm::kTanh && (a.scalar_type() != at::kFloat || a.numel() == 0 || a.is_neg() || a.is_conj())) {
+    return std::nullopt;
+  }
   // Two separate constraints on integers:
   //  * sqrt/log/exp/reciprocal promote an int input to float in ATen, so fusing
   //    them would return the wrong dtype.
@@ -495,6 +522,7 @@ EmitResult EmitUnary(EmitCtx &ctx, dvm::UnaryType op, const at::Tensor &a) {
       case dvm::kAbs: return ctx.k->GetKernel().Unary<dvm::kAbs>(la);
       case dvm::kLog: return ctx.k->GetKernel().Unary<dvm::kLog>(la);
       case dvm::kExp: return ctx.k->GetKernel().Unary<dvm::kExp>(la);
+      case dvm::kTanh: return ctx.k->GetKernel().Unary<dvm::kTanh>(la);
       case dvm::kReciprocal: return ctx.k->GetKernel().Unary<dvm::kReciprocal>(la);
       case dvm::kRound: return ctx.k->GetKernel().Unary<dvm::kRound>(la);
       case dvm::kFloor: return ctx.k->GetKernel().Unary<dvm::kFloor>(la);
@@ -564,26 +592,6 @@ EmitResult EmitSigmoid(EmitCtx &ctx, const at::Tensor &a) {
   dvm::NDObject *e = ctx.k->GetKernel().Unary<dvm::kExp>(neg);
   dvm::NDObject *den = ctx.k->GetKernel().Binary<dvm::kAdd>(e, 1.0f);
   dvm::NDObject *res = ctx.k->GetKernel().Unary<dvm::kReciprocal>(den);
-  std::vector<int64_t> out_shape(a.sizes().begin(), a.sizes().end());
-  at::Tensor out = AllocateLike(out_shape, a.scalar_type(), a);
-  ctx.k->Write(out, res);
-  ctx.k->AppendSignature(ctx.op_name);
-  return out;
-}
-
-EmitResult EmitTanh(EmitCtx &ctx, const at::Tensor &a) {
-  if (!Eligible(a) || !IsFloatDtype(a)) {
-    return std::nullopt;
-  }
-  // tanh(x) = 2 / (1 + exp(-2x)) - 1. Not bit-exact against ATen, so the caller
-  // must check Caps::strict_accuracy before enabling it.
-  dvm::NDObject *la = ctx.k->Read(a);
-  dvm::NDObject *t2 = ctx.k->GetKernel().Binary<dvm::kMul>(la, 2.0f);
-  dvm::NDObject *neg = ctx.k->GetKernel().Binary<dvm::kSub>(0.0f, t2);
-  dvm::NDObject *e = ctx.k->GetKernel().Unary<dvm::kExp>(neg);
-  dvm::NDObject *den = ctx.k->GetKernel().Binary<dvm::kAdd>(e, 1.0f);
-  dvm::NDObject *r = ctx.k->GetKernel().Binary<dvm::kDiv>(2.0f, den);
-  dvm::NDObject *res = ctx.k->GetKernel().Binary<dvm::kSub>(r, 1.0f);
   std::vector<int64_t> out_shape(a.sizes().begin(), a.sizes().end());
   at::Tensor out = AllocateLike(out_shape, a.scalar_type(), a);
   ctx.k->Write(out, res);
@@ -690,7 +698,7 @@ EmitResult EmitReduction(EmitCtx &ctx, const at::Tensor &a, at::OptionalIntArray
 
 EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
                              const at::Tensor &other, const at::Scalar &alpha) {
-  if (!Eligible(self) || !Eligible(other)) {
+  if (!EligibleBinary(op, self) || !EligibleBinary(op, other) || self.device() != other.device()) {
     return std::nullopt;
   }
   if (self.scalar_type() != other.scalar_type()) {
@@ -702,7 +710,10 @@ EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
   if (!shape || at::IntArrayRef(*shape) != self.sizes()) {
     return std::nullopt;
   }
-  auto scale = BinaryAlpha(op, self.scalar_type(), alpha);
+  if (IsAddSub(op) && self.is_alias_of(other) && at::get_overlap_status(self, other) == at::MemOverlapStatus::Partial) {
+    return std::nullopt;
+  }
+  auto scale = BinaryAlpha(op, self, alpha);
   if (!scale) {
     return std::nullopt;
   }
@@ -713,7 +724,7 @@ EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
     switch (op) {
       case dvm::kAdd:
       case dvm::kSub:
-        return ScaledAddSub(ctx.k->GetKernel(), op, ls, lo, *scale, ToDvmDtype(self.scalar_type()));
+        return ScaledAddSub(*ctx.k, op, ls, lo, *scale, ToDvmDtype(self.scalar_type()), *shape);
       case dvm::kMul: return ctx.k->GetKernel().Binary<dvm::kMul>(ls, lo);
       case dvm::kDiv: return ctx.k->GetKernel().Binary<dvm::kDiv>(ls, lo);
       case dvm::kMaximum: return ctx.k->GetKernel().Binary<dvm::kMaximum>(ls, lo);
@@ -731,15 +742,15 @@ EmitResult EmitBinaryInplace(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
 
 EmitResult EmitBinaryInplaceScalar(EmitCtx &ctx, dvm::BinaryType op, at::Tensor &self,
                                    const at::Scalar &other, const at::Scalar &alpha) {
-  if (!Eligible(self) || !ScalarTypeIsFusable(self) || other.isComplex() ||
+  if (!EligibleBinary(op, self) || !ScalarTypeIsFusable(self) || other.isComplex() ||
       (op == dvm::kSub && other.isBoolean())) {
     return std::nullopt;
   }
-  auto scale = BinaryAlpha(op, self.scalar_type(), alpha);
+  auto scale = BinaryAlpha(op, self, alpha);
   if (!scale) {
     return std::nullopt;
   }
-  const float constant = other.to<float>();
+  const float constant = IsAddSub(op) ? FloatOperand(other) : other.toFloat();
   dvm::NDObject *ls = ctx.k->Read(self);
   dvm::NDObject *res = [&]() -> dvm::NDObject * {
     switch (op) {

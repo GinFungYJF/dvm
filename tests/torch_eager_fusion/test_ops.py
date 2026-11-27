@@ -78,6 +78,51 @@ def test_unary(shape, name):
     assert_same(actual, expected)
 
 
+@CUDA
+def test_tanh_fuses_with_its_producer_and_preserves_fp32_bits():
+    edges = torch.tensor([-0.0, 0.0, -1e-40, 1e-40, -1e-8, 1e-8,
+                          -float("inf"), float("inf"), float("nan")], device="cuda")
+    x = torch.cat((edges, torch.linspace(-12, 12, 4097, device="cuda")))
+    actual, expected = run_eager_and_fused(lambda: (x * 1.0).tanh())
+    assert torch_dvm.stats()["graph_sizes"] == {2: 1}
+    assert torch.equal(actual.isnan(), expected.isnan())
+    valid = ~expected.isnan()
+    assert torch.equal(actual.view(torch.int32)[valid], expected.view(torch.int32)[valid])
+
+
+@CUDA
+def test_tanh_does_not_join_a_graph_that_only_reads_its_input():
+    x = torch.linspace(-2, 2, 31, device="cuda")
+    actual, expected = run_eager_and_fused(lambda: (x * 2, x.tanh()))
+    assert torch_dvm.stats()["graph_sizes"] == {1: 1}
+    for result, reference in zip(actual, expected):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.int32, torch.float64])
+@CUDA
+def test_tanh_native_dtype_fallback(dtype):
+    x = torch.arange(-17, 18, device="cuda", dtype=dtype)
+    actual, expected = run_eager_and_fused(lambda: (x * x).tanh())
+    assert torch_dvm.stats()["graph_sizes"] == ({} if dtype == torch.float64 else {1: 1})
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@CUDA
+def test_tanh_forward_saves_the_value_for_backward():
+    x = torch.linspace(-3, 3, 257, device="cuda", requires_grad=True)
+    grad = torch.linspace(2, -2, 257, device="cuda")
+
+    def run():
+        y = (x * 0.5).tanh()
+        dx, = torch.autograd.grad(y, x, grad)
+        return y, dx
+
+    actual, expected = run_eager_and_fused(run)
+    for result, reference in zip(actual, expected):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "shape_a,shape_b",
     [((4, 1), (1, 5)), ((3,), (2, 4, 3)), ((1,), (1024,)), ((2, 1, 6), (1, 4, 1))],

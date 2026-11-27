@@ -42,6 +42,7 @@ EmitResult DispatchBinaryScalar(const OpKey &key, dvm::BinaryType op, const at::
 EmitResult DispatchExpandedDiv(const OpKey &key, const at::Tensor &input, const at::Scalar &divisor);
 EmitResult DispatchDropoutBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &mask,
                                    double scale);
+EmitResult DispatchTanhBackward(const OpKey &key, const at::Tensor &grad, const at::Tensor &output);
 EmitResult DispatchEq(const OpKey &key, const at::Tensor &a, const at::Tensor &b);
 EmitResult DispatchEqScalar(const OpKey &key, const at::Tensor &a, const at::Scalar &b);
 EmitResult DispatchMaskedFill(const OpKey &key, const at::Tensor &self, const at::Tensor &mask,
@@ -53,7 +54,6 @@ EmitResult DispatchNeg(const OpKey &key, const at::Tensor &a);
 EmitResult DispatchRelu(const OpKey &key, const at::Tensor &a);
 EmitResult DispatchRsqrt(const OpKey &key, const at::Tensor &a);
 EmitResult DispatchSigmoid(const OpKey &key, const at::Tensor &a);
-EmitResult DispatchTanh(const OpKey &key, const at::Tensor &a);
 EmitResult DispatchPowScalar(const OpKey &key, const at::Tensor &a, double exponent);
 EmitResult DispatchClamp(const OpKey &key, const at::Tensor &a,
                          const std::optional<c10::Scalar> &min,

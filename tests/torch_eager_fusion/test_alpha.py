@@ -40,12 +40,11 @@ def test_tensor_alpha_broadcast_and_alias(op, dtype, alpha):
     target = initial.clone()
     alias = target.detach()
     version = target._version
-    with fused(compile_fast=True):
+    with fused():
         torch_dvm.reset_stats()
         actual, rhs = run(target)
     assert torch_dvm.stats()["emitted"] == 2
-    torch.testing.assert_close(actual, expected, rtol=1e-5 if dtype == torch.float32 else 1e-2,
-                               atol=1e-6 if dtype == torch.float32 else 1e-3)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     torch.testing.assert_close(rhs, expected_rhs, rtol=0, atol=0)
     if op.endswith("_"):
         assert actual is target
@@ -70,7 +69,7 @@ def test_scalar_alpha_entrypoints(op, direct_scalar):
     with eager():
         expected = run(initial.clone())
     value = initial.clone()
-    with fused(compile_fast=True):
+    with fused():
         torch_dvm.reset_stats()
         actual = run(value)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -87,10 +86,10 @@ def test_scalar_alpha_preserves_opmath_precision(op, dtype, alpha):
     with eager():
         expected = call(initial.clone(), 1.0003, alpha)
     value = initial.clone()
-    with fused(compile_fast=True):
+    with fused():
         torch_dvm.reset_stats()
         actual = call(value, 1.0003, alpha)
-    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-7)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert torch_dvm.stats()["emitted"] == 1
 
 
@@ -113,7 +112,7 @@ def test_alpha_does_not_round_product_to_low_precision(op, dtype, scalar_side):
         lhs = left.reshape(()) if scalar_side == "left" else left
         return getattr(torch.ops.aten, op).Tensor(lhs, rhs, alpha=1.0003)
 
-    actual, expected = run_eager_and_fused(run, compile_fast=True)
+    actual, expected = run_eager_and_fused(run)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert torch_dvm.stats()["emitted"] >= 1
     assert actual.abs().item() > 0
@@ -150,7 +149,7 @@ def test_invalid_alpha_uses_native_error_after_flushing(op, dtype, alpha):
     y = torch.full_like(x, 2)
     with eager(), pytest.raises(RuntimeError) as error:
         getattr(x.clone(), op)(y, alpha=alpha)
-    with fused(compile_fast=True):
+    with fused():
         torch_dvm.reset_stats()
         pending = y * y
         with pytest.raises(RuntimeError) as actual_error:
@@ -161,13 +160,18 @@ def test_invalid_alpha_uses_native_error_after_flushing(op, dtype, alpha):
 
 
 @pytest.mark.parametrize("op", ["add", "sub", "add_", "sub_"])
-def test_strict_alpha_retains_native_fma(op):
+@pytest.mark.parametrize("rhs", ["tensor", "python_scalar", "aten_scalar"])
+def test_scaled_alpha_fuses_without_intermediate_overflow(op, rhs):
     sign = -1 if op.startswith("add") else 1
     initial = torch.tensor([sign * 3e38], device="cuda")
     source = torch.tensor([3e38], device="cuda")
 
     def run(target):
-        return getattr(target, op)(source * 1, alpha=2)
+        if rhs == "tensor":
+            return getattr(target, op)(source * 1, alpha=2)
+        if rhs == "python_scalar":
+            return getattr(target, op)(3e38, alpha=2)
+        return getattr(torch.ops.aten, op).Scalar(target, 3e38, 2)
 
     with eager():
         expected = run(initial.clone())
@@ -177,7 +181,28 @@ def test_strict_alpha_retains_native_fma(op):
         actual = run(target)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert torch.isfinite(actual).all()
-    assert torch_dvm.stats()["emitted"] == 1
+    assert torch_dvm.stats()["emitted"] == (2 if rhs == "tensor" else 1)
+
+
+@pytest.mark.parametrize("op", ["add", "sub"])
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+@pytest.mark.parametrize("shapes", [((13, 1), (1, 17)), ((), (3, 17)), ((3, 17), ()), ((), ())])
+def test_scaled_alpha_broadcasts_to_result_shape(op, dtype, shapes):
+    torch.manual_seed(983)
+    left, right = [torch.randn(shape, device="cuda", dtype=dtype) for shape in shapes]
+    actual, expected = run_eager_and_fused(lambda: getattr(left * 1, op)(right, alpha=0.1))
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch_dvm.stats()["graph_sizes"] == {2: 1}
+
+
+@pytest.mark.parametrize("op", ["add", "sub"])
+@pytest.mark.parametrize("alpha", [0, 0.0, -0.0, -(1 << 63), (1 << 64) - 1, (1 << 60) + (1 << 36) + 1])
+def test_alpha_preserves_scalar_type_until_conversion(op, alpha):
+    x = torch.tensor([-0., -0., 2., 0.], device="cuda")
+    y = torch.tensor([1., -1., 0., 1.], device="cuda")
+    actual, expected = run_eager_and_fused(lambda: getattr(x * 1, op)(y, alpha=alpha))
+    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+    assert torch_dvm.stats()["graph_sizes"] == {2: 1}
 
 
 @pytest.mark.parametrize("op", ["add", "sub", "add_", "sub_"])
@@ -197,9 +222,9 @@ def test_scaled_add_sub_backward(op):
     with eager():
         expected, expected_grads = run([x.clone().requires_grad_() for x in initial])
     inputs = [x.clone().requires_grad_() for x in initial]
-    with fused(compile_fast=True):
+    with fused():
         actual, grads = run(inputs)
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     for got, want in zip(grads, expected_grads):
         torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
 
@@ -215,9 +240,27 @@ def test_scaled_add_sub_special_values(op, alpha, dtype):
     def run():
         return getattr(x * 1, op)(y, alpha=alpha)
 
-    actual, expected = run_eager_and_fused(run, compile_fast=True)
+    actual, expected = run_eager_and_fused(run)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
     assert torch_dvm.stats()["emitted"] == 2
+
+
+def test_scaled_bf16_add_preserves_nan_from_pending_multiply():
+    # Several positive and negative NaN payloads, along with infinities and signed zeros.
+    source = torch.tensor([0x7f81, 0x7fc0, 0x7fff, -127, -1, 0x7f80, -128, 0, -32768],
+                          device="cuda", dtype=torch.int16).view(torch.bfloat16)
+    left = torch.zeros_like(source)
+
+    def run():
+        rhs = source * 1
+        return rhs, left.add(rhs, alpha=0.25)
+
+    actual, expected = run_eager_and_fused(run)
+    assert torch_dvm.stats()["graph_sizes"] == {2: 1}
+    for got, want in zip(actual, expected):
+        assert torch.equal(got.isnan(), want.isnan())
+        valid = ~want.isnan()
+        assert torch.equal(got.view(torch.int16)[valid], want.view(torch.int16)[valid])
 
 
 @pytest.mark.parametrize("op", ["add", "add_"])
@@ -225,7 +268,7 @@ def test_alpha_does_not_bypass_producer_filter(op):
     x, y = [torch.randn(17, device="cuda") for _ in range(2)]
     with eager():
         expected = getattr(x.clone(), op)(y, alpha=2)
-    with fused(compile_fast=True):
+    with fused():
         torch_dvm.reset_stats()
         actual = getattr(x, op)(y, alpha=2)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -241,7 +284,7 @@ def test_scaled_alpha_fallback_materializes_pending_rhs(op, fallback):
                          dtype=torch.float16 if fallback == "dtype" else torch.float32)
     with eager():
         expected = getattr(target.clone(), op)(source * 2, alpha=0.1)
-    with fused(compile_fast=True):
+    with fused():
         torch_dvm.reset_stats()
         pending = source * 2
         actual = getattr(target, op)(pending, alpha=0.1)
@@ -254,18 +297,80 @@ def test_scaled_alpha_fallback_materializes_pending_rhs(op, fallback):
 def test_scaled_scalar_preserves_native_promotion(op, dtype, scalar):
     x = torch.arange(17, device="cuda", dtype=dtype)
     call = getattr(torch.ops.aten, op).Scalar
-    actual, expected = run_eager_and_fused(call, x, scalar, 2, compile_fast=True)
+    actual, expected = run_eager_and_fused(call, x, scalar, 2)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert actual.dtype == expected.dtype
     assert torch_dvm.stats()["emitted"] == 0
+
+
+@pytest.mark.parametrize("op,cpu_first", [("add", True), ("sub", False), ("add_", False), ("sub_", False)])
+def test_scaled_zero_dim_tensors_preserve_native_promotion(op, cpu_first):
+    gpu = torch.tensor(1., device="cuda", dtype=torch.float32)
+    cpu = torch.tensor(1. + 2. ** -30, dtype=torch.float64)
+
+    def run():
+        a, b = (cpu, gpu) if cpu_first else (gpu.clone(), cpu)
+        return getattr(torch.ops.aten, op).Tensor(a, b, alpha=-1 if op.startswith("add") else 1.00000001)
+
+    actual, expected = run_eager_and_fused(run)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch_dvm.stats()["emitted"] == 0
+
+
+def test_scaled_sub_inplace_obeys_tensor_overlap():
+    base = torch.arange(24, device="cuda", dtype=torch.float32)
+    source, target = base[:-1], base[1:]
+    with eager(), pytest.raises(RuntimeError) as expected:
+        target.sub_(source, alpha=0.25)
+    with fused():
+        torch_dvm.reset_stats()
+        pending = base * 2
+        with pytest.raises(RuntimeError) as actual:
+            target.sub_(source, alpha=0.25)
+    assert str(actual.value) == str(expected.value)
+    assert torch_dvm.stats()["emitted"] == 1
+    torch.testing.assert_close(pending, base * 2, rtol=0, atol=0)
+
+    def same_tensor():
+        value = base.clone()
+        return value.sub_(value, alpha=0.25)
+
+    actual, expected = run_eager_and_fused(same_tensor)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch_dvm.stats()["emitted"] == 1
+
+
+def test_scaled_add_empty():
+    x = torch.empty(0, 3, device="cuda")
+    actual, expected = run_eager_and_fused(lambda: x.add(2., alpha=0.25))
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch_dvm.stats()["emitted"] == 0
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two CUDA devices")
+def test_scaled_sub_checks_devices():
+    with torch.cuda.device(0):
+        x = torch.ones(7, device="cuda:0")
+        y = torch.ones(7, device="cuda:1")
+        actual, expected = run_eager_and_fused(lambda: y.sub(2., alpha=0.25))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert torch_dvm.stats()["emitted"] == 0
+        with eager(), pytest.raises(RuntimeError) as native_error:
+            x.sub(y, alpha=0.25)
+        with fused():
+            torch_dvm.reset_stats()
+            pending = x * 2
+            with pytest.raises(RuntimeError) as fused_error:
+                pending.sub(y, alpha=0.25)
+        assert str(fused_error.value) == str(native_error.value)
+        torch.testing.assert_close(pending, x * 2, rtol=0, atol=0)
+        assert torch_dvm.stats()["emitted"] == 1
 
 
 @pytest.mark.parametrize("op", ["add", "sub", "add_", "sub_"])
 def test_scaled_scalar_respects_disable_ops(op):
     x = torch.arange(17, device="cuda", dtype=torch.float32)
     call = getattr(torch.ops.aten, op).Scalar
-    actual, expected = run_eager_and_fused(
-        lambda: call(x * 2, 0.1, 0.2), compile_fast=True, disable_ops=op
-    )
+    actual, expected = run_eager_and_fused(lambda: call(x * 2, 0.1, 0.2), disable_ops=op)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert torch_dvm.stats()["emitted"] == 1

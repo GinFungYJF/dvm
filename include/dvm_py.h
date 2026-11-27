@@ -324,6 +324,7 @@ static inline void RegDvmPy(const py::module &m) {
     .def("abs", &KernelPy::Unary<UnaryOpType::kAbs>, "emit abs")
     .def("log", &KernelPy::Unary<UnaryOpType::kLog>, "emit log")
     .def("exp", &KernelPy::Unary<UnaryOpType::kExp>, "emit exp")
+    .def("tanh", &KernelPy::Unary<UnaryOpType::kTanh>, "emit GPU FP32 tanh")
     .def("reciprocal", &KernelPy::Unary<UnaryOpType::kReciprocal>, "emit reciprocal")
     .def("isfinite", &KernelPy::Unary<UnaryOpType::kIsFinite>, "emit isfinite")
     .def("logical_not", &KernelPy::Unary<UnaryOpType::kLogicalNot>, "emit logical_not")

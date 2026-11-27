@@ -69,8 +69,12 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 融合集合（手写 unboxed 包装器）：
 
 `add` `sub` `mul` `div` `maximum` `minimum` `pow(Tensor,Scalar)` `neg` `relu`
-`sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `clamp` `round` `floor`
-`ceil` `trunc` `sum` `mean` `native_dropout_backward`，以及 `add_` `sub_` `mul_` `div_` `relu_`。
+`sqrt` `rsqrt` `abs` `exp` `log` `reciprocal` `sigmoid` `tanh` `clamp` `round` `floor`
+`ceil` `trunc` `sum` `mean` `native_dropout_backward` `tanh_backward`，以及 `add_` `sub_` `mul_` `div_` `relu_`。
+
+浮点 `add`、`sub`、`add_` 和 `sub_` 支持非单位 `alpha`。GPU VM 以 FP32 执行融合乘加，
+支持张量、标量及广播输入，最后将结果舍入到输出类型（FP32、FP16 或 BF16）。两个张量之间的
+`add` 和 `add_` 需要至少一个输入由当前待执行图产生才能入图。
 
 其余 aten 算子注册一条通用守卫：**先 flush 再转发到注册前捕获的原 kernel**。
 
@@ -86,7 +90,11 @@ TORCH_DVM_FUSION="True level=O1 disable_ops=mul,div" python train.py
 - `sum` 和 `mean` 仅在输入由当前待执行图产生时参与融合。对已物化张量的归约
   使用原生 kernel，包括原本可以由归约开始、再连接后续算子的链。
 - `sum.out` / `mean.out` 和 `amax` / `amin` 等其余归约由通用守卫触发 flush 后执行。
-- `tanh` / `sigmoid` 由 `exp` 合成。`tanh` 默认关闭，可由 `compile_fast=True` 启用。
+- 当前待执行图产生非空、连续的 FP32 输入时，函数式 `tanh` 自动入图，由 GPU VM 执行 CUDA `tanhf`。
+  独立调用、其他数据类型、`out=` 和原地版本走 PyTorch 原生路径。`sigmoid` 由 VM 使用 `exp` 合成。
+- 当上游梯度由当前待执行图产生时，`tanh_backward` 默认参与融合。梯度和前向保存的 `tanh` 输出
+  须为同一 GPU 上形状相同、非空、连续的 FP32 张量。GPU VM 对保存的输出 `y` 计算
+  `fma(-y, y, 1.0)`，再乘以上游梯度。独立调用和 `out=` 重载走 PyTorch 原生路径。
 
 ## 性能
 

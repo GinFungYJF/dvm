@@ -51,14 +51,13 @@ void ParseOpList(const std::string &text, std::unordered_set<std::string> *out) 
   }
 }
 
-void Enable(const std::string &mode, int64_t level, bool compile_fast, bool guards,
+void Enable(const std::string &mode, int64_t level, bool guards,
             const std::string &dump_dir, bool dump_as_text,
             const std::string &disable_ops, const std::string &enable_ops) {
   dvm_torch::Flags f = dvm_torch::GetFlags();
   f.enabled = true;
   f.mode = ParseMode(mode);
   f.level = static_cast<int>(level);
-  f.compile_fast = compile_fast;
   f.guards = guards;
   f.dump_dir = dump_dir;
   f.dump_as_text = dump_as_text;
@@ -123,7 +122,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "DVM eager fusion for native PyTorch";
 
   m.def("enable", &Enable, py::arg("mode") = "", py::arg("level") = 2,
-        py::arg("compile_fast") = false, py::arg("guards") = true,
+        py::kw_only(), py::arg("guards") = true,
         py::arg("dump_dir") = "./dvm_dump", py::arg("dump_as_text") = false,
         py::arg("disable_ops") = "", py::arg("enable_ops") = "");
   m.def("enable_from_env", &EnableFromEnv);
