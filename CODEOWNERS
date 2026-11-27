@@ -7,7 +7,6 @@
 # The rules are applied from top to bottom, and the last matching rule will take effect.
 
 # If the file in PR does not match rule, the default maintainer gaoxiong-1 will be designated to conduct code review.
-* @gaoxiong-1
+* @gaoxiong-1 @limingqi107
 
-# The maintainers of packages.
-/packages/ @gaoxiong-1 @GinFungYJF
+# Retired committers: None to date.
