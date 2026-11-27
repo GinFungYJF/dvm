@@ -86,6 +86,36 @@ __device__ __forceinline__ void WritePointwise(const PointwiseInstruction &insn,
   }
 }
 
+__device__ __forceinline__ PointwiseValues Evaluate(const PointwiseInstruction &insn,
+                                                    const PointwiseTemporaries &values, PointwiseIndex at) {
+  auto a = values.Read(insn.inputs[0], at);
+  if (insn.op == Arithmetic::Tanh) {
+#pragma unroll
+    for (auto &lane : a.v) lane = tanhf(lane);
+    return a;
+  }
+  auto b = values.Read(insn.inputs[1], at);
+  if (insn.op == Arithmetic::Fma) {
+    auto c = values.Read(insn.inputs[2], at);
+#pragma unroll
+    for (uint32_t i = 0; i < kPointwiseLanes; ++i) {
+      a.v[i] = __fmaf_rn(insn.negate_product ? -a.v[i] : a.v[i], b.v[i], c.v[i]);
+    }
+    return a;
+  }
+#pragma unroll
+  for (uint32_t i = 0; i < kPointwiseLanes; ++i) {
+    switch (insn.op) {
+      case Arithmetic::Add: a.v[i] = __fadd_rn(a.v[i], b.v[i]); break;
+      case Arithmetic::Sub: a.v[i] = __fsub_rn(a.v[i], b.v[i]); break;
+      case Arithmetic::Mul: a.v[i] = __fmul_rn(a.v[i], b.v[i]); break;
+      case Arithmetic::Div: a.v[i] = __fdiv_rn(a.v[i], b.v[i]); break;
+      default: __builtin_unreachable();
+    }
+  }
+  return a;
+}
+
 __device__ __forceinline__ void RunPointwise(const PointwiseProgram &program, uint32_t group) {
   uint32_t dense = group * kPointwiseLanes;
   if (dense >= program.elements) return;
@@ -94,17 +124,7 @@ __device__ __forceinline__ void RunPointwise(const PointwiseProgram &program, ui
   PointwiseTemporaries values{};
   for (int pc = 0; pc < program.count; ++pc) {
     const auto &insn = program.ops[pc];
-    auto a = values.Read(insn.lhs, at);
-    auto b = values.Read(insn.rhs, at);
-#pragma unroll
-    for (uint32_t lane = 0; lane < kPointwiseLanes; ++lane) {
-      switch (insn.op) {
-        case Arithmetic::Add: values.previous.v[lane] = __fadd_rn(a.v[lane], b.v[lane]); break;
-        case Arithmetic::Sub: values.previous.v[lane] = __fsub_rn(a.v[lane], b.v[lane]); break;
-        case Arithmetic::Mul: values.previous.v[lane] = __fmul_rn(a.v[lane], b.v[lane]); break;
-        case Arithmetic::Div: values.previous.v[lane] = __fdiv_rn(a.v[lane], b.v[lane]); break;
-      }
-    }
+    values.previous = Evaluate(insn, values, at);
     values.Save(insn.save_slot);
     WritePointwise(insn, at, values.previous);
   }

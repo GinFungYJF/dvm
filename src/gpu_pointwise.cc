@@ -17,6 +17,7 @@
 #include "gpu_pointwise.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -76,13 +77,20 @@ struct Access {
   }
 };
 
+PointwiseOperand Immediate(scode_t bits) {
+  PointwiseOperand operand{};
+  operand.source = Source::Immediate;
+  std::memcpy(&operand.literal, &bits, sizeof(float));
+  return operand;
+}
+
 class PointwiseBuilder {
  public:
   explicit PointwiseBuilder(PointwiseProgram &program) : program_(program) {}
 
   bool Build(const std::vector<NDObject *> &objects) {
-    // Each binary instruction can introduce two loads, two broadcasts and one store.
-    if (objects.size() > 6 * kPointwiseMaxOps) return false;
+    // Each instruction can introduce a load and a broadcast per input, plus one store.
+    if (objects.size() > (2 * kPointwiseMaxInputs + 2) * kPointwiseMaxOps) return false;
     for (auto op : objects) {
       if (op->type_id_ != kFloat32 || !op->shape_ref_) return false;
       if (op->obj_id_ == kStore) {
@@ -116,15 +124,18 @@ class PointwiseBuilder {
           // The binary normalizer inserts these right-aligned broadcasts.
           if (op->CheckFlag(OBJ_FLAG_EAGER) || !GetIndex(*op->lhs_->shape_ref_, *op->shape_ref_, index)) return false;
           break;
+        case kUnary:
         case kBinary:
         case kBinaryS:
+        case kFmaScalarOp:
+        case kFmaTensorOp:
           if (!AddInstruction(op)) return false;
           break;
         default:
           return false;
       }
     }
-    return program_.count >= 2 && AliasesSafe();
+    return program_.count >= 2 && AliasesSafe() && AssignSavedSlots();
   }
 
  private:
@@ -182,44 +193,85 @@ class PointwiseBuilder {
     if (producer == program_.count - 1) {
       operand.source = Source::Previous;
     } else {
-      auto &slot = program_.ops[producer].save_slot;
-      if (slot < 0) {
-        if (program_.saved == kPointwiseSaved) return false;
-        slot = program_.saved++;
-      }
       operand.source = Source::Saved;
-      operand.slot = slot;
+      operand.slot = producer;  // Resolved once all uses are known.
     }
+    return true;
+  }
+
+  bool AssignSavedSlots() {
+    // Walk backwards from the last reader to its producer. At one instruction
+    // a dying input and its result can share a slot: all reads precede Save.
+    std::array<bool, kPointwiseSaved> live{};
+    for (int pc = program_.count - 1; pc >= 0; --pc) {
+      auto &insn = program_.ops[pc];
+      if (insn.save_slot >= 0) live[insn.save_slot] = false;
+      for (auto &input : insn.inputs) {
+        if (input.source != Source::Saved) continue;
+        auto &slot = program_.ops[input.slot].save_slot;
+        if (slot < 0) {
+          auto free = std::find(live.begin(), live.end(), false);
+          if (free == live.end()) return false;
+          slot = static_cast<int8_t>(free - live.begin());
+          *free = true;
+          program_.saved = std::max<int>(program_.saved, slot + 1);
+        }
+        input.slot = slot;
+      }
+    }
+    return true;
+  }
+
+  bool TensorOrImmediate(NDObject *tensor, scode_t bits, PointwiseOperand &operand) {
+    if (tensor) return Operand(tensor, operand);
+    operand = Immediate(bits);
     return true;
   }
 
   bool AddInstruction(NDObject *op) {
     if (program_.count == kPointwiseMaxOps) return false;
     auto &insn = program_.ops[program_.count];
+    auto &inputs = insn.inputs;
     insn.save_slot = -1;
-    if (!Operand(op->lhs_, insn.lhs)) return false;
-    if (op->obj_id_ == kBinary) {
-      if (!Operand(op->rhs_, insn.rhs)) return false;
-      switch (static_cast<BinaryOp *>(op)->GetOpType()) {
-        case kAdd: insn.op = Arithmetic::Add; break;
-        case kSub: insn.op = Arithmetic::Sub; break;
-        case kMul: insn.op = Arithmetic::Mul; break;
-        case kDiv: insn.op = Arithmetic::Div; break;
-        default: return false;
+    if (!Operand(op->lhs_, inputs[0])) return false;
+    switch (op->obj_id_) {
+      case kUnary:
+        if (static_cast<UnaryOp *>(op)->GetOpType() != kTanh) return false;
+        insn.op = Arithmetic::Tanh;
+        break;
+      case kFmaTensorOp:
+      case kFmaScalarOp: {
+        auto *fma = static_cast<FmaOp *>(op);
+        if (!TensorOrImmediate(fma->Factor(), fma->GetScalar(), inputs[1]) ||
+            !TensorOrImmediate(fma->Addend(), fma->GetScalar(), inputs[2])) return false;
+        insn.op = Arithmetic::Fma;
+        insn.negate_product = fma->NegateProduct();
+        break;
       }
-    } else {
-      auto scalar = static_cast<BinaryScalarOp *>(op);
-      if (scalar->IsScalarRef()) return false;
-      insn.rhs.source = Source::Immediate;
-      auto bits = scalar->GetScalar();
-      std::memcpy(&insn.rhs.literal, &bits, sizeof(float));
-      switch (scalar->GetOpType()) {
-        case kAdds: insn.op = Arithmetic::Add; break;
-        case kMuls: insn.op = Arithmetic::Mul; break;
-        case ksDiv: std::swap(insn.lhs, insn.rhs); [[fallthrough]];
-        case kDivs: insn.op = Arithmetic::Div; break;
-        default: return false;
+      case kBinary:
+        if (!Operand(op->rhs_, inputs[1])) return false;
+        switch (static_cast<BinaryOp *>(op)->GetOpType()) {
+          case kAdd: insn.op = Arithmetic::Add; break;
+          case kSub: insn.op = Arithmetic::Sub; break;
+          case kMul: insn.op = Arithmetic::Mul; break;
+          case kDiv: insn.op = Arithmetic::Div; break;
+          default: return false;
+        }
+        break;
+      case kBinaryS: {
+        auto *scalar = static_cast<BinaryScalarOp *>(op);
+        if (scalar->IsScalarRef()) return false;
+        inputs[1] = Immediate(scalar->GetScalar());
+        switch (scalar->GetOpType()) {
+          case kAdds: insn.op = Arithmetic::Add; break;
+          case kMuls: insn.op = Arithmetic::Mul; break;
+          case ksDiv: std::swap(inputs[0], inputs[1]); [[fallthrough]];
+          case kDivs: insn.op = Arithmetic::Div; break;
+          default: return false;
+        }
+        break;
       }
+      default: return false;
     }
     results_[program_.count++] = op;
     return true;
@@ -228,7 +280,7 @@ class PointwiseBuilder {
   PointwiseProgram &program_;
   const IntArrayRef *domain_{nullptr};
   NDObject *results_[kPointwiseMaxOps];
-  Access accesses_[3 * kPointwiseMaxOps];
+  Access accesses_[(kPointwiseMaxInputs + 1) * kPointwiseMaxOps];
   size_t access_count_{0};
 };
 

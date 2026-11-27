@@ -2499,7 +2499,7 @@ uint64_t FmaOp::Emit(VectorKernel &k) {
   op.count = nd_.stride_back();
   op.operand = xhs_ ? static_cast<uint32_t>(xhs_->data[0]->xbuf_) : scalar_;
   op.mode = mode_;
-  op.negate_product = sign_ == ProductSign::kNegative;
+  op.negate_product = NegateProduct();
   return vFma::Encode(insn_, V_GPU_FMA, op);
 }
 

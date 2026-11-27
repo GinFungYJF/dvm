@@ -78,6 +78,13 @@ The GPU VM uses an FP32 fused multiply-add for tensor and scalar operands, inclu
 and rounds the result to the output dtype (FP32, FP16, or BF16). Tensor–tensor `add` and `add_`
 join a graph when either input has a pending producer.
 
+The GPU backend can encode a single scheduled region of 2–12 FP32 arithmetic instructions
+as one `Pointwise` instruction. It supports add, subtract, multiply, divide, tanh, and fused
+multiply-add. Selection depends on alignment, supported broadcasts, safe memory access,
+and whether the live intermediate values fit in three saved slots plus the previous result.
+This lets forward and backward GELU expressions use the same vectorized executor as other
+pointwise chains. Other fused graphs use the regular GPU VM.
+
 Other ATen operators use a generic guard: **flush first, then forward to the original
 kernel captured before registration**.
 

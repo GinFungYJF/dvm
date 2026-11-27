@@ -28,13 +28,14 @@ namespace dvm {
 class Code;
 class NDObject;
 namespace gpu {
-constexpr int kPointwiseMaxOps = 8;
-constexpr int kPointwiseSaved = 2;
+constexpr int kPointwiseMaxOps = 12;
+constexpr int kPointwiseSaved = 3;
+constexpr int kPointwiseMaxInputs = 3;
 constexpr uint32_t kPointwiseThreads = 128;
 constexpr uint32_t kPointwiseLanes = 4;
 enum class Index : uint8_t { Dense, Row, Column, Scalar };
 enum class Source : uint8_t { Dense, Row, Column, Scalar, Immediate, Previous, Saved };
-enum class Arithmetic : uint8_t { Add, Sub, Mul, Div };
+enum class Arithmetic : uint8_t { Add, Sub, Mul, Div, Tanh, Fma };
 
 struct PointwiseOperand {
   union {
@@ -46,11 +47,12 @@ struct PointwiseOperand {
 };
 
 struct PointwiseInstruction {
-  PointwiseOperand lhs, rhs;
+  PointwiseOperand inputs[kPointwiseMaxInputs];
   float *output;
   Arithmetic op;
   Index output_index;
   int8_t save_slot;
+  bool negate_product;
 };
 
 struct PointwiseProgram {

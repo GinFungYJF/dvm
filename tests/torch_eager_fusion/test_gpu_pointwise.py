@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 import subprocess
 import sys
@@ -61,7 +62,7 @@ def check_case(case, enabled):
             scale = scalar * 1.25
             return scale, centered / scale
         if case == "long_chain":
-            for _ in range(8):
+            for _ in range(12):
                 centered = centered * .75
             return (centered,)
         if case == "inplace":
@@ -69,6 +70,7 @@ def check_case(case, enabled):
             result = accumulator.add_(scale * centered)
             return (result,)
         if case == "fanout":
+            # Four values have to survive past the instruction that produced them.
             b = x * col
             c = x - std
             d = x * beta
@@ -103,12 +105,12 @@ def check_case(case, enabled):
     kernels = [e for e in trace.events() if e.device_type == torch.autograd.DeviceType.CUDA]
     selected = [e for e in kernels if "dvm_vm_gpu_packed_code" in e.name]
     should_match = enabled and case in ("full", "packed_tail", "other_formula", "final_only", "five_outputs",
-                                        "inplace", "scalar_store", "values")
+                                        "inplace", "column_store", "scalar_store", "values")
     assert len(selected) == int(should_match), (case, [e.name for e in kernels])
     if should_match:
         assert len(kernels) == 2, (case, [e.name for e in kernels])
         assert selected[0].device_resource_id == kernels[0].device_resource_id
-    elif case == "full":
+    elif case in ("full", "fanout", "long_chain"):
         assert any("dvm::gpu::dvm_vm_gpu(" in e.name for e in kernels)
     for tensor, ref in zip(actual, expected):
         torch.testing.assert_close(tensor, ref, rtol=0, atol=0, equal_nan=True)
@@ -145,12 +147,65 @@ def check_partial_overlap():
     assert kernels and (len(kernels) > 1 or "dvm_vm_gpu_packed_code" not in kernels[0].name)
 
 
+def assert_pointwise_kernels(trace, count, enabled):
+    kernels = [e.name for e in trace.events() if e.device_type == torch.autograd.DeviceType.CUDA]
+    assert len(kernels) == count and all("dvm_vm_gpu" in name for name in kernels), kernels
+    assert sum("dvm_vm_gpu_packed_code" in name for name in kernels) == (count if enabled else 0), kernels
+
+
+def check_gelu_training(enabled):
+    x = torch.randn(3, 5, 128, device="cuda", requires_grad=True)
+    g = torch.randn_like(x)
+
+    def run():
+        h = 0.5 * x
+        t = torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0)))
+        u = 1.0 + t
+        y = h * u
+        torch_dvm.flush()
+        dx, = torch.autograd.grad(y, x, g)
+        return h, t, u, y, dx
+
+    expected = run()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                            torch.profiler.ProfilerActivity.CUDA]) as trace:
+        with fused():
+            torch_dvm.reset_stats()
+            actual = run()
+        torch.cuda.current_stream().synchronize()
+    assert torch_dvm.stats()["graph_sizes"] == {8: 1, 11: 1}
+    assert_pointwise_kernels(trace, 2, enabled)
+    for tensor, ref in zip(actual, expected):
+        assert torch.equal(tensor.view(torch.int32), ref.view(torch.int32))
+
+
+def check_scalar_factor(enabled):
+    x = torch.randn(1024, device="cuda")
+    y = torch.randn_like(x)
+
+    def run():
+        scaled = (x * .75).add(y, alpha=.1)
+        return scaled.sub(x, alpha=.3)
+
+    expected = run()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                            torch.profiler.ProfilerActivity.CUDA]) as trace:
+        with fused():
+            actual = run()
+        torch.cuda.current_stream().synchronize()
+    assert_pointwise_kernels(trace, 1, enabled)
+    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+
+
 if __name__ == "__main__":
     torch.manual_seed(31)
     torch_dvm.disable()
     with torch.cuda.stream(torch.cuda.Stream()):
+        enabled = os.environ.get("DVM_GPU_POINTWISE", "1") == "1"
         for name in ("full", "packed_tail", "odd_width", "short_tail", "offset", "column_store", "ragged_outputs",
                      "other_formula", "final_only", "five_outputs", "fanout", "inplace", "scalar_store", "long_chain",
                      "values", "middle_broadcast", "half"):
-            check_case(name, os.environ.get("DVM_GPU_POINTWISE", "1") == "1")
+            check_case(name, enabled)
         check_partial_overlap()
+        check_gelu_training(enabled)
+        check_scalar_factor(enabled)
